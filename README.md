@@ -46,11 +46,11 @@ Trên trang GitHub của repo, chọn **Code → HTTPS**, sao chép URL rồi ch
 
 ```powershell
 cd D:\
-git clone 'https://github.com/TEN-CUA-BAN/TEN-REPO.git' ESP32S3_Driver_Monitor_Git
+git clone 'https://github.com/Kanj3eNguyen/BTL_IOT.git' ESP32S3_Driver_Monitor_Git
 cd .\ESP32S3_Driver_Monitor_Git
 ```
 
-Thay URL ví dụ bằng URL repo thật. Có thể chọn **Code → Download ZIP**, giải
+URL trên là repo của dự án. Có thể chọn **Code → Download ZIP**, giải
 nén vào một đường dẫn ngắn, không dấu và không khoảng trắng, rồi mở PowerShell
 tại thư mục vừa giải nén. Các lệnh sau giả sử bạn đang ở **gốc repo**.
 
