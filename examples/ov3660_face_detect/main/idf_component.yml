@@ -1,0 +1,13 @@
+dependencies:
+  espressif/esp_video:
+    version: 2.5.0
+  espressif/esp_cam_sensor:
+    version: 2.6.0
+  espressif/esp-dl:
+    version: 3.3.13
+  espressif/esp32-camera:
+    version: 2.1.8
+  esp32_s3_eye_noglib:
+    version: 5.0.2
+  human_face_detect:
+    version: 0.5.0

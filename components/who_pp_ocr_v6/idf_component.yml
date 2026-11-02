@@ -1,0 +1,9 @@
+## IDF Component Manager Manifest File
+##
+## Registry `espressif/pp_ocr_v6` is used as-is. Our one behavior tweak
+## (`dl::Model`'s `param_copy=false` in both `Det::Det` and `Rec::Rec`)
+## is applied as a hotfix patch — see
+## `examples/pp_ocr_v6/patches/pp_ocr_v6_param_copy_false.patch`.
+dependencies:
+  espressif/pp_ocr_v6:
+    version: "*"

@@ -1,0 +1,2 @@
+-r requirements-viewer.txt
+scikit-learn>=1.4,<2

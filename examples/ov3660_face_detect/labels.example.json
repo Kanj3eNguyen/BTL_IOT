@@ -1,0 +1,8 @@
+{
+  "note": "CHI LA VI DU. Xem training_video.avi va sua cac moc giay theo video cua ban. Moi khoang [bat_dau, ket_thuc) la giay da on dinh, bo qua luc chuyen dong.",
+  "validation_from_second": 60,
+  "eye_open_ranges": [[2, 10], [18, 25], [34, 42], [50, 58], [62, 70], [78, 86], [95, 103], [112, 120]],
+  "eye_closed_ranges": [[11, 16], [26, 31], [71, 76], [104, 109]],
+  "mouth_closed_ranges": [[2, 16], [26, 42], [62, 76], [95, 109]],
+  "mouth_open_ranges": [[18, 25], [50, 58], [78, 86], [112, 120]]
+}

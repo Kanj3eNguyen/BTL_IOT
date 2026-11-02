@@ -1,0 +1,84 @@
+menu "Driver monitor MQTT"
+
+    config DRIVER_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+
+    config DRIVER_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+
+    config DRIVER_MQTT_URI
+        string "ThingsBoard MQTT URI"
+        default "mqtt://mqtt.thingsboard.cloud:1883"
+        help
+            Public ThingsBoard Cloud MQTT host and port. For a private
+            ThingsBoard server, set its MQTT URI.
+
+    config DRIVER_MQTT_TOKEN
+        string "ThingsBoard device access token"
+        default ""
+        help
+            The token is used as the MQTT username. Keep sdkconfig private.
+
+    config DRIVER_MQTT_INTERVAL_MS
+        int "Telemetry publish interval (ms)"
+        range 1000 60000
+        default 5000
+
+endmenu
+
+menu "Driver monitor buzzer"
+
+    config DRIVER_BUZZER_ENABLED
+        bool "Enable driver alert buzzer"
+        default y
+
+    config DRIVER_BUZZER_GPIO
+        int "Buzzer signal GPIO"
+        range 0 48
+        default 14
+        depends on DRIVER_BUZZER_ENABLED
+        help
+            GPIO4 is camera I2C SDA on this board. Use GPIO14 for the
+            external buzzer signal and connect a common ground.
+
+    config DRIVER_BUZZER_ACTIVE_LOW
+        bool "Buzzer sounds when signal is LOW"
+        default y
+        depends on DRIVER_BUZZER_ENABLED
+
+    config DRIVER_ALERT_WINDOW_SECONDS
+        int "Blink and yawn counting window (seconds)"
+        range 10 300
+        default 60
+
+    config DRIVER_ALERT_YAWN_LIMIT
+        int "Alert at this many yawns within the window"
+        range 1 32
+        default 3
+
+    config DRIVER_ALERT_EYES_CLOSED_MS
+        int "Alert after eyes stay closed (milliseconds)"
+        range 500 10000
+        default 1500
+
+    config DRIVER_ALERT_PERCLOS_PERCENT
+        int "Alert at PERCLOS percentage over 60 seconds"
+        range 1 100
+        default 15
+        help
+            PERCLOS alarm starts after a 60-second window containing at least
+            30 seconds of valid eye observations. The window resets after
+            each completed 15-second alarm. Missing eye observations are
+            excluded from the denominator.
+
+    config DRIVER_ALERT_NO_FACE_SECONDS
+        int "Alert when no face has been seen for this many seconds"
+        range 1 30
+        default 5
+        help
+            After this delay, the buzzer gives one short beep every three
+            seconds until a face is detected again.
+
+endmenu

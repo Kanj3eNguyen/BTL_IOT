@@ -1,0 +1,21 @@
+# Local build products and downloaded IDF components
+**/build/
+**/managed_components/
+**/dependencies.lock*
+
+# Local Wi-Fi password and ThingsBoard device token live in sdkconfig
+**/sdkconfig
+**/sdkconfig.old
+
+# Captured face video and local Python environment
+/training_data/
+**/recordings/
+**/__pycache__/
+**/*.pyc
+.venv/
+**/driver_ml_weights.candidate.hpp
+**/driver_ml_weights.backup.hpp
+
+# Local editor files
+.vscode/
+.idea/
