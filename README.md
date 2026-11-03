@@ -194,6 +194,21 @@ trong dấu nháy để PowerShell chuyển nguyên vẹn cho `idf.py`. Lệnh n
 > thể tạo lại `sdkconfig`, cần nhập lại Wi-Fi/token. Lần build bình thường
 > không chạy lại `set-target`.
 
+### 4.2. Chế độ local có gateway xác minh
+
+Nếu cần kiểm tra HMAC và chống phát lại trước khi ghi telemetry vào
+ThingsBoard, làm theo toàn bộ [hướng dẫn local A–Z](docs/CHAY_LOCAL_A_Z.md).
+Chế độ này không dùng access token ThingsBoard trên firmware: bo kết nối
+MQTTS tới gateway trên PC, còn gateway giữ token đích và chuyển tiếp mẫu đã
+được xác minh tới ThingsBoard local. Mỗi máy/bo phải tự sinh khóa, mật khẩu,
+CA và chứng chỉ trong `.private`; không sao chép các tệp này sang máy khác.
+
+Không trộn `sdkconfig` Cloud với `sdkconfig` local. Sau khi chạy
+`Setup-Local.ps1`, dùng `Build-Flash.ps1` để build vào `build_guard` và nạp
+đúng cấu hình local. Khi quay lại Cloud, chọn URI
+`mqtts://mqtt.thingsboard.cloud:8883` trong `idf.py menuconfig`, rồi
+build/flash lại. Không đưa `sdkconfig`, `.private`, firmware hoặc khóa lên Git.
+
 ## 5. Build và nạp lên bo
 
 Vẫn trong **cửa sổ PowerShell ở mục 4**, và đang đứng tại
@@ -443,10 +458,15 @@ ESP32S3_Driver_Monitor_Git/
 ├── README.md                 # Hướng dẫn này
 ├── docs/HE_THONG_HOAT_DONG.md # Giải thích chi tiết cơ chế hệ thống
 ├── docs/GIAI_THICH_TUNG_FILE.md # Vai trò file/hàm, thuật toán và lệnh chạy
+├── docs/CHAY_LOCAL_A_Z.md    # Chạy ThingsBoard local và MQTT guard
+├── docs/KE_HOACH_CHONG_GIA_MAO.md # Phạm vi và giới hạn xác thực telemetry
 ├── requirements-viewer.txt  # Thư viện Python xem stream
 ├── requirements-train.txt   # Thư viện Python huấn luyện
+├── requirements-mqtt-guard.txt # Phụ thuộc gateway và kiểm thử guard
 ├── LICENSE                  # Giấy phép nguồn ESP-WHO
-├── tools/                   # ESP-WHO: chọn BSP và mô hình khi build
+├── server/                  # Gateway MQTT và công cụ ThingsBoard local
+├── tests/security/          # Kiểm thử HMAC, replay, TLS và ACL
+├── tools/                   # Script build/flash, local server và CI
 ├── components/              # Các component ESP-WHO dùng khi build
 └── examples/ov3660_face_detect/
     ├── CMakeLists.txt
@@ -456,7 +476,7 @@ ESP32S3_Driver_Monitor_Git/
     ├── record_training_video.py
     ├── train_driver_model.py
     ├── labels.example.json
-    └── main/               # Firmware và trọng số ML trên ESP32-S3
+    └── main/               # Firmware, CA công khai và trọng số ML
 ```
 
 Các thư viện lớn trong `managed_components` và công cụ ESP-IDF được cài/tải

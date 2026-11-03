@@ -603,6 +603,42 @@ tăng phơi sáng có thể làm nhiễu/mờ mà không khôi phục chi tiết
 mắt/miệng vẫn chuẩn hóa theo da như lúc train. Muốn khẳng định độ chính xác
 ở nhiều phòng/người cần video có nhãn từ các điều kiện đó để kiểm tra riêng.
 
+### 2.11. `driver_frame_guard.hpp`: giới hạn dữ liệu trong một frame
+
+Mở [driver_frame_guard.hpp](../examples/ov3660_face_detect/main/driver_frame_guard.hpp).
+Header này giữ các giới hạn dùng chung khi tạo telemetry: kích thước payload,
+tuổi mẫu và các giá trị số được phép. Nó không xác thực nguồn gửi và không
+thay HMAC; mục đích là để firmware không đóng gói dữ liệu vượt giới hạn
+trước khi chuyển sang lớp MQTT hoặc serial.
+
+### 2.12. `driver_message_auth.hpp` và `.cpp`: ký và xác minh MQTT guard
+
+Mở [header](../examples/ov3660_face_detect/main/driver_message_auth.hpp) và
+[file thực hiện](../examples/ov3660_face_detect/main/driver_message_auth.cpp).
+Module này tạo `boot_id`, ký hello/telemetry bằng HMAC-SHA256 theo định dạng
+DM-MQTT-1, rồi xác minh grant và ACK có đúng device, request, boot và phiên
+hay không. Khóa HMAC, key ID và mật khẩu MQTT chỉ lấy từ `CONFIG_...` trong
+`sdkconfig`; không ghi chúng vào serial hoặc log.
+
+Ở chế độ guard, hello được gửi trước telemetry và bo chỉ báo
+`guard_ready` sau khi nhận grant hợp lệ. ACK chỉ tăng
+`guard_forwarded_sequence`/`guard_forwarded_count` sau khi gateway xác nhận
+đã chuyển tiếp mẫu. Khi guard tắt, các hàm này trả trạng thái rỗng để đường
+Cloud cũ vẫn hoạt động.
+
+### 2.13. Chế độ guard trong `driver_telemetry.cpp`
+
+Khi `CONFIG_DRIVER_MQTT_GUARD_ENABLED=y`, `driver_telemetry.cpp` dùng URI
+MQTTS của gateway, subscribe downlink riêng của device và không gửi access
+token ThingsBoard từ firmware. Gateway cấp phiên có hạn, kiểm tra freshness
+và sequence, rồi mới chuyển mẫu tới ThingsBoard local. Khi cấu hình guard
+không đầy đủ, task mạng báo lỗi và không giả lập trạng thái đã xác minh.
+
+Khi guard tắt, module giữ đường MQTTS Cloud: token device là username MQTT,
+CA Cloud được nhúng và telemetry đi tới topic ThingsBoard chuẩn. Hai đường
+đều dùng SNTP/TLS; khác nhau ở nơi giữ token đích và bước xác minh trước khi
+ghi dữ liệu.
+
 <a id="python"></a>
 
 ## 3. Từng chương trình Python chạy trên PC
@@ -831,6 +867,22 @@ Ví dụ sau khi đã ghi bằng viewer vào `review_01`:
 
 Kết quả mặc định là `review_01/review_stream.avi`. Quy trình train trong
 README dùng `training_video.avi` từ recorder để gắn nhãn thời gian chính xác.
+
+### 3.7. Gateway và ThingsBoard local
+
+Các file trong [server/mqtt_guard](../server/mqtt_guard) chạy trên PC, không
+chạy trên ESP32. `protocol.py` giữ định dạng byte ký và parser chặt;
+`verifier.py` quản lý phiên, freshness, sequence và SQLite outbox;
+`gateway.py` cung cấp MQTT TLS/ACL, gọi verifier và chuyển mẫu hợp lệ tới
+ThingsBoard. `ntp.py` cung cấp giờ bootstrap trong LAN; `provision.py` sinh
+khóa, CA/chứng chỉ và cấu hình `sdkconfig`.
+
+Các file trong [server/thingsboard_local](../server/thingsboard_local) dùng
+REST local để tạo tài khoản/device và dựng dashboard. Các script
+[Setup-Local.ps1](../tools/Setup-Local.ps1), [Start-Local.ps1](../tools/Start-Local.ps1),
+[Stop-Local.ps1](../tools/Stop-Local.ps1) chỉ điều khiển dịch vụ local và
+giữ dữ liệu/khóa trong `.private`. Không đặt token, mật khẩu hoặc private key
+trong source hay tài liệu commit lên Git.
 
 <a id="cau-hinh"></a>
 

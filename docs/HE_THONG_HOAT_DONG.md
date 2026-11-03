@@ -222,7 +222,7 @@ nhận luồng mới. Nếu COM bị chiếm, đóng viewer trước khi nạp f
 
 Nếu `menuconfig` có SSID, mật khẩu, URI và token, bo kết nối Wi-Fi rồi
 gửi JSON đến topic `v1/devices/me/telemetry` theo chu kỳ mặc định **5 giây**.
-Token device được dùng làm tên đăng nhập MQTT. Phiên bản hiện dùng
+Token device được dùng làm tên đăng nhập MQTT. Ở chế độ Cloud, URI mặc định là
 `mqtts://mqtt.thingsboard.cloud:8883`: TLS mã hóa kết nối và xác minh máy
 chủ bằng [CA nhúng trong firmware](../examples/ov3660_face_detect/main/certs/README.md).
 Bo đồng bộ giờ SNTP sau khi Wi-Fi có IP rồi mới bắt đầu kết nối TLS, để
@@ -237,6 +237,22 @@ chạy mới với các khoảng gửi bị thiếu. `mqtt_acked` trên viewer t
 broker xác nhận bản tin QoS 1; LED nháy cùng sự kiện này. Trên ThingsBoard,
 `eyes_closed`, `mouth_open`, `perclos` có thể là `null` khi dữ liệu tương
 ứng chưa hợp lệ. `null` là “không đo được”, còn `false`/`0` là giá trị đã đo.
+
+Khi bật `CONFIG_DRIVER_MQTT_GUARD_ENABLED`, đường truyền đổi thành:
+
+```text
+ESP32-S3 --MQTTS/HMAC--> gateway PC:8885
+gateway --MQTT local--> ThingsBoard:18884
+```
+
+Firmware khi đó không dùng access token ThingsBoard để gửi thẳng. Nó ký
+hello và telemetry bằng khóa riêng, nhận session có hạn từ gateway, rồi chỉ
+đánh dấu `guard_ready` sau khi grant hợp lệ. `guard_forwarded_sequence` và
+`guard_forwarded_count` chỉ tăng khi gateway ký ACK sau khi ThingsBoard đã
+PUBACK; `mqtt_acked` chỉ phản ánh broker đầu vào. Cấu hình, CA local và
+token đích được giữ ngoài repo trong `.private`. Xem
+[hướng dẫn chạy local](CHAY_LOCAL_A_Z.md) và
+[kế hoạch xác thực/chống phát lại](KE_HOACH_CHONG_GIA_MAO.md).
 
 ### Đọc các trường thường gặp
 
@@ -306,6 +322,7 @@ Sau đó xem [các ví dụ theo dấu lời gọi hàm](GIAI_THICH_TUNG_FILE.md
 | JSON + JPEG qua COM | [`serial_jpeg_stream.cpp`](../examples/ov3660_face_detect/main/serial_jpeg_stream.cpp) |
 | Bù phơi sáng theo môi trường/mặt | [`driver_lighting.cpp`](../examples/ov3660_face_detect/main/driver_lighting.cpp) |
 | Wi-Fi, MQTT, `sequence`, ACK | [`driver_telemetry.cpp`](../examples/ov3660_face_detect/main/driver_telemetry.cpp) |
+| Ký HMAC, session và ACK của local guard | [`driver_message_auth.cpp`](../examples/ov3660_face_detect/main/driver_message_auth.cpp), [`server/mqtt_guard/verifier.py`](../server/mqtt_guard/verifier.py) |
 | LED GPIO48 | [`driver_status_led.cpp`](../examples/ov3660_face_detect/main/driver_status_led.cpp) |
 | Cửa sổ stream trên PC | [`driver_monitor_viewer.py`](../examples/ov3660_face_detect/driver_monitor_viewer.py) |
 | Ghi video và huấn luyện | [`record_training_video.py`](../examples/ov3660_face_detect/record_training_video.py), [`train_driver_model.py`](../examples/ov3660_face_detect/train_driver_model.py) |
