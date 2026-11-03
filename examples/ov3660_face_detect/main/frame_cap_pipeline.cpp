@@ -1,4 +1,5 @@
 #include "frame_cap_pipeline.hpp"
+#include "driver_lighting.hpp"
 #include "esp_video_init.h"
 #include "video_capture.hpp"
 #include "bsp/esp-bsp.h"
@@ -119,6 +120,9 @@ WhoFrameCap *get_dvp_frame_cap_pipeline(bool lcd)
 
     auto cap = new VideoCapture();
     auto buffer_cnt = lcd ? (MODEL_TIME + 3) : (MODEL_TIME + 2);
+#if defined(CONFIG_CAMERA_OV3660) && defined(BSP_BOARD_ESP32_S3_EYE)
+    buffer_cnt = 6; // Keep camera frames valid while detection is processing.
+#endif
     auto cfg = VideoCapture::Config(ESP_VIDEO_DVP_DEVICE_NAME, V4L2_PIX_FMT_RGB565X, buffer_cnt);
 
 #if defined(CONFIG_CAMERA_OV3660) && defined(BSP_BOARD_ESP32_S3_EYE)
@@ -131,6 +135,9 @@ WhoFrameCap *get_dvp_frame_cap_pipeline(bool lcd)
 #endif
     cap->init(cfg);
     cap->start();
+#if defined(CONFIG_CAMERA_OV3660) && defined(BSP_BOARD_ESP32_S3_EYE)
+    driver_lighting_init(cap);
+#endif
 
     auto frame_cap = new WhoFrameCap();
     frame_cap->add_node<WhoFetchNode>("FrameCapFetch", cap);

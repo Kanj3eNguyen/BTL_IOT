@@ -59,7 +59,7 @@ không được nối vào GPIO4.
 ## 3. Từ lúc cấp điện đến khung hình đầu tiên
 
 1. Firmware khởi động ở [`app_main.cpp`](../examples/ov3660_face_detect/main/app_main.cpp).
-   Nó đặt luồng serial ở 921600 baud, thử buzzer bằng tiếng bíp ngắn, tắt
+   Nó đặt luồng serial ở 1500000 baud, thử buzzer bằng tiếng bíp ngắn, tắt
    LED cũ đang sáng và khởi tạo phần Wi-Fi/MQTT nếu đã có cấu hình.
 2. [`frame_cap_pipeline.cpp`](../examples/ov3660_face_detect/main/frame_cap_pipeline.cpp)
    khởi động OV3660, đặt xung 20 MHz, lấy ảnh RGB565. Ảnh được lật trước
@@ -120,8 +120,12 @@ Nếu camera cứ hướng lên trần, `driver_present=false` và không có s�
 
 `scene_luma` và `face_luma` là độ sáng trung bình của ảnh, thang **0–255**.
 Chúng giúp nhận biết cảnh tối/ngược sáng; chúng **không phải đơn vị lux**.
-Việc chuẩn hóa theo da chỉ bù được một phần thay đổi ánh sáng. Cần thử thật
-ở từng phòng để biết model có còn nhận đúng hay không.
+Ngoài chuẩn hóa theo da, `driver_lighting.cpp` điều chỉnh mục tiêu phơi
+sáng của OV3660 theo độ sáng mặt: tăng/giảm từng mức, làm mượt tín hiệu và
+chờ ít nhất 1,5 giây giữa hai lần đổi. Sau ba giây không có mặt, dùng độ
+sáng toàn cảnh. Viewer có `Light`, `AE` để theo dõi. Đây là bù ảnh từ cảm
+biến, không tự train model mới. Cần thử thật ở từng phòng để biết model
+có còn nhận đúng hay không; không thể khôi phục chi tiết khi quá tối/cháy sáng.
 
 ## 5. Blink và ngáp được đếm thế nào?
 
@@ -200,8 +204,10 @@ dung nhận diện đúng; nó giúp nhìn thấy đường gửi dữ liệu đ
 
 ### COM: ảnh và chẩn đoán trực quan
 
-Mỗi khung hợp lệ được bo chép sang bộ đệm riêng, vẽ khung mặt, nén JPEG rồi gửi
-cùng một JSON trạng thái qua **UART 921600 baud**. Gói có dấu bắt đầu,
+Khung mới nhất được bo chép sang bộ đệm riêng; một task stream vẽ khung mặt,
+nén bằng `esp_new_jpeg` rồi gửi. Queue chỉ giữ một preview đang chờ, nên có
+thể bỏ preview cũ để giữ độ mới mà phần nhận diện vẫn tiếp tục chạy. Video gửi
+cùng một JSON trạng thái qua **UART 1500000 baud**. Gói có dấu bắt đầu,
 loại gói, độ dài và mã kiểm tra. [`driver_monitor_viewer.py`](../examples/ov3660_face_detect/driver_monitor_viewer.py)
 trên PC tìm gói, kiểm tra dữ liệu, giải mã JPEG và vẽ bảng kết quả. Nếu
 gói hỏng, viewer bỏ gói và tìm gói tiếp theo; `Bad UART` giúp bạn thấy số
@@ -216,9 +222,14 @@ nhận luồng mới. Nếu COM bị chiếm, đóng viewer trước khi nạp f
 
 Nếu `menuconfig` có SSID, mật khẩu, URI và token, bo kết nối Wi-Fi rồi
 gửi JSON đến topic `v1/devices/me/telemetry` theo chu kỳ mặc định **5 giây**.
-Token device được dùng làm tên đăng nhập MQTT. Bản thử đang dùng
-`mqtt://...:1883`, tức là **không mã hóa** trên đường truyền; hãy dùng mạng
-tin cậy cho giai đoạn thử nghiệm.
+Token device được dùng làm tên đăng nhập MQTT. Phiên bản hiện dùng
+`mqtts://mqtt.thingsboard.cloud:8883`: TLS mã hóa kết nối và xác minh máy
+chủ bằng [CA nhúng trong firmware](../examples/ov3660_face_detect/main/certs/README.md).
+Bo đồng bộ giờ SNTP sau khi Wi-Fi có IP rồi mới bắt đầu kết nối TLS, để
+kiểm tra cả thời hạn chứng chỉ. Việc chờ nằm trong task mạng, nên nhận diện
+và stream COM vẫn tiếp tục. Viewer hiện `Time: WAIT`/`Time: OK` và trạng thái
+`MQTTS`; không thấy MQTTS connected ngay khi Wi-Fi vừa kết nối là có thể
+đang chờ đồng bộ giờ. Firmware từ chối URI MQTT thường.
 
 Mỗi chu kỳ có một `sequence` mới, kể cả lúc MQTT offline. `boot_id` đổi
 khi bo khởi động lại. Người quản trị dùng hai trường này để phân biệt lần
@@ -238,6 +249,7 @@ broker xác nhận bản tin QoS 1; LED nháy cùng sự kiện này. Trên Thin
 | `blink_count`, `yawn_count` | Tổng số lần được đếm từ lúc bo khởi động, không tự xóa sau một lượt cảnh báo. |
 | `blink_window_count`, `yawn_window_count` | Số lần còn trong cửa sổ gần 60 giây; cửa sổ ngáp còn được xóa sau lượt báo ngáp. |
 | `eye_closed_duration` | Số giây mắt đang nhắm liên tục trong lần hiện tại; về 0 khi mở mắt hoặc mất phép đo. |
+| `auto_light`, `ae_level`, `lighting_state` | Camera có nhận control bù sáng hay không, mức mục tiêu AE và trạng thái sáng (`ADJUST`, `OK`, `DARK`, `BRIGHT`; serial dùng mã 0..4). |
 | `perclos`, `perclos_observed_s`, `perclos_window_ready` | Tỷ lệ nhắm mắt, số giây mắt hợp lệ đã quan sát, và cờ cho biết đã đủ dữ liệu để xét cảnh báo. |
 | `alert_reasons`, `alert_reasons_mask`, `buzzer_pattern` | Lý do cảnh báo dạng chữ, dạng bit để máy xử lý, và kiểu nhịp buzzer đang được chọn. |
 | `boot_id`, `sequence` | Mã lần khởi động và số thứ tự chu kỳ gửi. Dùng chung để nhận ra bo vừa reset hoặc bị thiếu bản tin. |
@@ -292,6 +304,7 @@ Sau đó xem [các ví dụ theo dấu lời gọi hàm](GIAI_THICH_TUNG_FILE.md
 | Các trọng số mô hình mắt/miệng trong firmware | [`driver_ml_weights.hpp`](../examples/ov3660_face_detect/main/driver_ml_weights.hpp) |
 | Ngưỡng cảnh báo, cửa sổ ngáp, buzzer | [`driver_alert.cpp`](../examples/ov3660_face_detect/main/driver_alert.cpp), [`Kconfig.projbuild`](../examples/ov3660_face_detect/main/Kconfig.projbuild) |
 | JSON + JPEG qua COM | [`serial_jpeg_stream.cpp`](../examples/ov3660_face_detect/main/serial_jpeg_stream.cpp) |
+| Bù phơi sáng theo môi trường/mặt | [`driver_lighting.cpp`](../examples/ov3660_face_detect/main/driver_lighting.cpp) |
 | Wi-Fi, MQTT, `sequence`, ACK | [`driver_telemetry.cpp`](../examples/ov3660_face_detect/main/driver_telemetry.cpp) |
 | LED GPIO48 | [`driver_status_led.cpp`](../examples/ov3660_face_detect/main/driver_status_led.cpp) |
 | Cửa sổ stream trên PC | [`driver_monitor_viewer.py`](../examples/ov3660_face_detect/driver_monitor_viewer.py) |

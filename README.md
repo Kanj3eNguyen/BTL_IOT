@@ -1,10 +1,16 @@
 # Giám sát tài xế với ESP32-S3-CAM OV3660
 
+**Bản local có xác thực MQTT:** xem [hướng dẫn từ A đến Z](docs/CHAY_LOCAL_A_Z.md)
+để chạy PC làm server ThingsBoard, xác minh HMAC và chống phát lại. Mọi dữ
+liệu server/khóa/build mới đặt trên D; dùng lại công cụ đã có. Hướng dẫn
+MQTTS Cloud bên dưới dành cho chế độ gửi trực tiếp cũ. Chế độ guard gửi
+qua cổng xác minh local trước khi vào ThingsBoard.
+
 Repo này dành cho bo **ESP32-S3-WROOM-1 N16R8** (flash 16 MB, PSRAM 8 MB),
 camera **OV3660** dùng sơ đồ chân **ESP32-S3-EYE**, và module buzzer chủ động
 ở **GPIO14**. Firmware chạy nhận diện mặt, mắt và miệng **ngay trên bo**.
 Máy tính chỉ nhận ảnh cùng kết quả qua cổng USB serial để hiển thị. Bo có thể
-gửi số liệu lên ThingsBoard Cloud qua Wi-Fi 2,4 GHz và MQTT.
+gửi số liệu lên ThingsBoard Cloud qua Wi-Fi 2,4 GHz và **MQTTS (MQTT qua TLS)**.
 
 Hướng dẫn dưới đây dành cho **Windows 10/11, PowerShell**. Dự án đã được build
 với **ESP-IDF v5.5.5**. Người dùng mới cần Internet ở lần cài đặt và build đầu.
@@ -23,6 +29,9 @@ phát cảnh báo và gửi kết quả qua COM/MQTT. Có thể đọc sau bư�
 file chạy trên bo hay PC, ai gọi nó, nó nhận/xử lý/trả dữ liệu gì, công thức
 model, cách giữ bộ đếm và ý nghĩa từng lệnh. Có cả hướng dẫn tra lỗi theo
 file và ví dụ lần một blink/ngáp/bản tin MQTT qua các hàm liên quan.
+
+Phần bảo vệ dữ liệu: [Cơ chế xác thực và chống phát lại MQTT](docs/KE_HOACH_CHONG_GIA_MAO.md).
+Không triển khai model phát hiện ảnh in/video giả hoặc nhịp tim/SpO₂.
 
 ## 1. Chuẩn bị phần cứng
 
@@ -122,7 +131,8 @@ Trong `menuconfig`, vào **Driver monitor MQTT** và điền:
 | --- | --- |
 | Wi-Fi SSID | Tên mạng Wi-Fi **2,4 GHz** mà bo sẽ kết nối |
 | Wi-Fi password | Mật khẩu mạng trên |
-| ThingsBoard MQTT URI | `mqtt://mqtt.thingsboard.cloud:1883` nếu dùng ThingsBoard Cloud |
+| ThingsBoard MQTT URI | `mqtts://mqtt.thingsboard.cloud:8883` nếu dùng ThingsBoard Cloud |
+| SNTP server for TLS clock synchronization | Giữ `pool.ntp.org`, hoặc máy chủ NTP mà mạng của bạn truy cập được |
 | ThingsBoard device access token | Token của **device của bạn** trên ThingsBoard |
 | Telemetry publish interval | Có thể để mặc định 5000 ms |
 
@@ -131,6 +141,54 @@ viewer vẫn nhận ảnh qua USB, nhưng Wi-Fi/MQTT sẽ hiện offline. Lưu c
 và thoát `menuconfig`. Tệp `sdkconfig` vừa tạo chứa mật khẩu/token **dạng chữ**;
 repo đã bỏ qua tệp này bằng `.gitignore`. Không đưa `sdkconfig`, ảnh khuôn mặt,
 video, hoặc firmware đã build cùng token thật lên GitHub.
+
+### 4.1. MQTTS, chứng chỉ CA và nâng cấp từ bản MQTT thường
+
+Firmware đã kèm [CA công khai của ThingsBoard](examples/ov3660_face_detect/main/certs/README.md)
+trong `main/certs/tb-cloud-root-ca.pem`. CMake nhúng file này vào firmware;
+bo dùng nó để kiểm tra chuỗi chứng chỉ và hostname của broker. Token device
+vẫn là username MQTT; không cần tạo private key hay chứng chỉ client.
+
+Nếu đã có `sdkconfig` từ bản cũ, chạy `idf.py menuconfig` → **Driver monitor
+MQTT** và đổi URI từ cổng 1883 sang `mqtts://mqtt.thingsboard.cloud:8883`.
+Giá trị cũ đã lưu không tự đổi theo default mới. Giữ SSID/mật khẩu/token
+của bạn, lưu rồi **build và flash** theo mục 5. Firmware mới từ chối URI
+`mqtt://` để tránh vô tình gửi token qua kết nối thường.
+
+Sau khi Wi-Fi nhận IP, task mạng đồng bộ giờ SNTP trước lần kết nối TLS
+đầu tiên để kiểm tra thời hạn chứng chỉ. Camera, nhận diện và stream COM
+vẫn chạy khi đang chờ. Viewer hiện `WiFi: CONNECTED  Time: WAIT` rồi
+`Time: OK`; khi broker kết nối được sẽ hiện `MQTTS: CONNECTED`, ACK tăng
+và LED nháy xanh. Nếu `Time: WAIT` kéo dài, kiểm tra Internet/DNS và NTP
+UDP 123; có thể đổi SNTP server trong menu rồi build/flash lại.
+
+Nếu cần cập nhật CA, chạy ở `examples/ov3660_face_detect`:
+
+```powershell
+curl.exe -f -S -L -o .\main\certs\tb-cloud-root-ca.pem https://thingsboard.cloud/api/device-connectivity/mqtts/certificate/download
+```
+
+Sau khi thay CA phải build/flash lại; bo không tự tải CA khi khởi động.
+Với server riêng, URI và CA phải thuộc server đó. Không tắt kiểm tra CA,
+hostname hoặc thời hạn chứng chỉ để xử lý lỗi kết nối.
+
+Nếu đã có `sdkconfig` riêng và muốn giữ Wi-Fi/token, **không chạy lại
+`set-target`** chỉ để đổi sang TLS. Nếu chưa có cache build trong bản
+nguồn mới, mở PowerShell tại gốc repo và dùng các tham số đầy đủ sau:
+
+```powershell
+$IdfPath = 'D:\esp\v5.5.5\esp-idf'
+. (Join-Path $IdfPath 'export.ps1')
+$env:IDF_EXTRA_ACTIONS_PATH = (Resolve-Path '.\tools').Path
+$env:IDF_PY_BUILD_JOBS = '2'
+cd .\examples\ov3660_face_detect
+idf.py '-DIDF_TARGET=esp32s3' '-DSDKCONFIG_DEFAULTS=sdkconfig.bsp.esp32_s3_eye_noglib' '-DDETECT_MODEL=human_face_detect' build
+idf.py -p COM4 flash
+```
+
+Thay đường dẫn ESP-IDF và cổng COM nếu máy bạn khác. Các tham số được đặt
+trong dấu nháy để PowerShell chuyển nguyên vẹn cho `idf.py`. Lệnh này dùng
+`sdkconfig` đã lưu; nó không xóa Wi-Fi/token như thao tác đổi target có thể làm.
 
 > **Chú ý:** `set-target` dùng cho lần đầu hoặc khi đổi target. Chạy lại có
 > thể tạo lại `sdkconfig`, cần nhập lại Wi-Fi/token. Lần build bình thường
@@ -179,6 +237,28 @@ không được gửi lên ThingsBoard.
 viewer đóng, miễn là còn nguồn và Wi-Fi. Để tắt hẳn bo, ngắt nguồn USB.
 
 ## 7. Chạy hằng ngày hoặc đổi sang máy khác
+
+Viewer hiện riêng **Video FPS** (preview nhận qua COM) và **AI FPS**
+(tốc độ phân tích trên bo). Nén/gửi JPEG có task riêng, chỉ giữ ảnh mới
+nhất đang chờ; `Skip` là số preview bị thay bằng ảnh mới, còn `UARTbad` là
+gói truyền lỗi. `Age` chưa bao gồm thời gian truyền UART của frame đó.
+
+Camera tự bù mục tiêu phơi sáng dựa trên độ sáng mặt, hoặc toàn cảnh khi
+không có mặt. `Light: ADJUST/OK/DARK/BRIGHT` và `AE` cho biết trạng thái;
+đổi môi trường có thể cần vài giây để ổn định. Cơ chế này hỗ trợ ảnh đầu
+vào, không bảo đảm model đúng ở mọi ánh sáng/người. Không có tính năng tự
+train model trong lúc sử dụng. Xem mục 2.10 của
+[Giải thích từng file](docs/GIAI_THICH_TUNG_FILE.md) để hiểu quy tắc bù sáng.
+
+Luồng preview mới dùng **1.500.000 baud** trên bo và viewer, phù hợp cổng
+CH343 đang dùng. Cần dùng viewer đi kèm bản firmware này; một viewer cũ
+giữ 921.600 baud sẽ không đọc đúng luồng mới. Lệnh mặc định không cần thêm
+`--baud` vì script đã chọn đúng tốc độ.
+
+Preset N16R8 dùng PSRAM cho cấp phát mbedTLS để chừa RAM nội cho Wi-Fi,
+UART và codec. Với cấu hình cũ đã lưu, vào **Component config → mbedTLS →
+Memory allocation strategy → External SPIRAM** rồi build/flash để áp dụng.
+Wi-Fi/token vẫn ở cấu hình cục bộ và không được đưa vào Git.
 
 - **Bo đã nạp firmware:** cắm nguồn USB, chờ khởi động. Không phải build hay
   flash lại. Để xem stream trên PC khác, cài Python và thư viện viewer theo
@@ -318,13 +398,15 @@ khởi động lại. `sequence` là số thứ tự gửi trong lần khởi đ
 | --- | --- |
 | `idf.py is not recognized` | Chạy `. (Join-Path $IdfPath 'export.ps1')` trong **đúng cửa sổ PowerShell** rồi thử `idf.py --version`. |
 | `BSP is not defined` | Đặt `$env:IDF_EXTRA_ACTIONS_PATH = (Resolve-Path '.\tools').Path` khi đang ở **gốc repo**, rồi vào thư mục dự án. |
+| `cc1plus.exe: out of memory` hoặc assembler báo `memory exhausted` | Máy PC thiếu RAM khi compile ESP-DL. Đặt `$env:IDF_PY_BUILD_JOBS = '1'` trong cửa sổ ESP-IDF rồi chạy lại `idf.py build`; không cần `fullclean`. Đây là lỗi bộ nhớ lúc build trên PC, không phải dung lượng PSRAM trên bo. |
 | Không thấy cổng COM | Thử cáp dữ liệu/cổng USB khác; xem Device Manager và driver CH343. |
 | COM đang được dùng | Đóng viewer, trình ghi và Serial Monitor; mỗi lúc chỉ một chương trình mở COM. |
 | Viewer báo thiếu `cv2`, `numpy` hoặc `serial` | Chạy lại ba lệnh ở mục 2.3, và dùng đúng `.venv\Scripts\python.exe`. |
 | Viewer đứng sau khi nhấn RST | Chờ bo khởi động vài giây. Nếu chưa tự nhận lại, nhấn `q` và mở viewer lại. |
-| `Corrupt JPEG data` hoặc `Bad UART` tăng | Dùng viewer trong repo này, giữ baud mặc định 921600, thử cáp USB ngắn hơn hoặc cổng USB khác. |
+| `Corrupt JPEG data` hoặc `Bad UART` tăng | Dùng viewer trong repo này, giữ baud mặc định 1500000, thử cáp USB ngắn hơn hoặc cổng USB khác. |
 | `WiFi: OFFLINE`, reason `201` | Bo không thấy SSID; kiểm tra tên mạng và băng 2,4 GHz. Nếu đổi tên/mật khẩu, cấu hình và nạp lại. |
-| `MQTT: OFFLINE` khi Wi-Fi đã kết nối | Kiểm tra Internet, MQTT URI và token của đúng device. |
+| `Time: WAIT` khi Wi-Fi đã kết nối | Bo chưa đồng bộ được giờ để kiểm tra chứng chỉ; kiểm tra Internet/DNS/NTP UDP 123 hoặc đổi SNTP server trong menu. |
+| `MQTTS: OFFLINE` khi `Time: OK` | Kiểm tra URI `mqtts://mqtt.thingsboard.cloud:8883`, token của đúng device, CA, hostname và mạng có cho TCP 8883 đi qua không. |
 | `Eyes: UNKNOWN` liên tục | Đưa đủ hai mắt vào khung hình, giảm góc quay đầu, kiểm tra ánh sáng mặt. |
 | Camera không lên | Xác nhận đúng OV3660 và chân camera tương thích ESP32-S3-EYE; kiểm tra nguồn USB. |
 

@@ -1,6 +1,8 @@
 #include "driver_telemetry.hpp"
 #include "driver_alert.hpp"
 #include "driver_status_led.hpp"
+#include "driver_lighting.hpp"
+#include "driver_message_auth.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -9,7 +11,9 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "mqtt_client.h"
 #include "nvs_flash.h"
@@ -18,12 +22,25 @@
 #include "freertos/task.h"
 
 namespace {
+#if CONFIG_DRIVER_MQTT_GUARD_ENABLED
+constexpr char kTopic[] = "dm/v1/" CONFIG_DRIVER_GUARD_DEVICE_ID "/telemetry";
+constexpr char kHelloTopic[] = "dm/v1/" CONFIG_DRIVER_GUARD_DEVICE_ID "/hello";
+constexpr char kDownTopic[] = "dm/v1/" CONFIG_DRIVER_GUARD_DEVICE_ID "/down";
+extern const char ingest_root_ca_pem_start[] asm("_binary_ingest_root_ca_pem_start");
+std::atomic_bool down_subscribed{false};
+#else
 constexpr char kTopic[] = "v1/devices/me/telemetry";
+extern const char tb_cloud_root_ca_pem_start[] asm("_binary_tb_cloud_root_ca_pem_start");
+#endif
 constexpr char kTag[] = "DRIVER_MQTT";
 QueueHandle_t latest_behavior = nullptr;
+TaskHandle_t mqtt_start_task_handle = nullptr;
 esp_mqtt_client_handle_t mqtt = nullptr;
 std::atomic_bool mqtt_connected{false};
 std::atomic_bool wifi_connected{false};
+std::atomic_bool time_synced{false};
+std::atomic_int tls_error{0};
+std::atomic_int tls_stack_error{0};
 std::atomic_uint32_t wifi_disconnect_reason{0};
 std::atomic_uint32_t mqtt_acked_count{0};
 std::atomic_uint32_t mqtt_sequence{0};
@@ -48,6 +65,9 @@ void on_wifi_event(void *, esp_event_base_t base, int32_t id, void *event_data)
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         wifi_connected.store(true);
         wifi_disconnect_reason.store(0);
+        if (mqtt_start_task_handle) {
+            xTaskNotifyGive(mqtt_start_task_handle);
+        }
         return;
     }
     if (base == WIFI_EVENT && (id == WIFI_EVENT_STA_START || id == WIFI_EVENT_STA_DISCONNECTED)) {
@@ -61,15 +81,84 @@ void on_wifi_event(void *, esp_event_base_t base, int32_t id, void *event_data)
     }
 }
 
-void on_mqtt_event(void *, esp_event_base_t, int32_t id, void *)
+void on_mqtt_event(void *, esp_event_base_t, int32_t id, void *data)
 {
     if (id == MQTT_EVENT_CONNECTED) {
         mqtt_connected.store(true);
+        tls_error.store(0);
+        tls_stack_error.store(0);
+#if CONFIG_DRIVER_MQTT_GUARD_ENABLED
+        down_subscribed.store(false);
+        driver_message_auth_connected();
+        esp_mqtt_client_subscribe(mqtt, kDownTopic, 1);
+#endif
     } else if (id == MQTT_EVENT_PUBLISHED) {
         mqtt_acked_count.fetch_add(1);
+#if !CONFIG_DRIVER_MQTT_GUARD_ENABLED
         driver_status_led_mqtt_published();
+#endif
+#if CONFIG_DRIVER_MQTT_GUARD_ENABLED
+    } else if (id == MQTT_EVENT_SUBSCRIBED) {
+        down_subscribed.store(true);
+    } else if (id == MQTT_EVENT_DATA) {
+        const auto *event = static_cast<esp_mqtt_event_handle_t>(data);
+        static char response[1537];
+        static int received = 0;
+        if (event->current_data_offset == 0) {
+            received = 0;
+            if (event->topic_len != int(sizeof(kDownTopic) - 1) ||
+                std::memcmp(event->topic, kDownTopic, sizeof(kDownTopic) - 1)) return;
+        }
+        if (event->total_data_len <= 0 || event->total_data_len >= int(sizeof(response)) ||
+            event->current_data_offset != received || event->data_len < 0 ||
+            received + event->data_len > event->total_data_len) {
+            received = -1;
+            return;
+        }
+        std::memcpy(response + received, event->data, event->data_len);
+        received += event->data_len;
+        if (received == event->total_data_len) {
+            response[received] = '\0';
+            if (driver_message_auth_receive(response, received)) driver_status_led_mqtt_published();
+            received = -1;
+        }
+#endif
     } else if (id == MQTT_EVENT_DISCONNECTED || id == MQTT_EVENT_ERROR) {
         mqtt_connected.store(false);
+#if CONFIG_DRIVER_MQTT_GUARD_ENABLED
+        down_subscribed.store(false);
+        driver_message_auth_disconnected();
+#endif
+        const auto *event = static_cast<esp_mqtt_event_handle_t>(data);
+        if (id == MQTT_EVENT_ERROR && event && event->error_handle) {
+            tls_error.store(event->error_handle->esp_tls_last_esp_err);
+            tls_stack_error.store(event->error_handle->esp_tls_stack_err);
+        }
+    }
+}
+
+void mqtt_start_task(void *)
+{
+    bool mqtt_started = false;
+    while (true) {
+        // Start/restart SNTP only after DHCP has supplied an IP address.
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (!wifi_connected.load()) {
+            continue;
+        }
+        ESP_ERROR_CHECK(esp_netif_sntp_start());
+        while (!time_synced.load() && wifi_connected.load()) {
+            if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000)) == ESP_OK) {
+                time_synced.store(true);
+            } else {
+                ESP_LOGW(kTag, "Waiting for SNTP before TLS; camera remains active");
+            }
+        }
+        if (time_synced.load() && wifi_connected.load() && !mqtt_started) {
+            // Certificate dates and hostname are verified by the TLS client.
+            ESP_ERROR_CHECK(esp_mqtt_client_start(mqtt));
+            mqtt_started = true;
+        }
     }
 }
 
@@ -78,8 +167,22 @@ void publish_task(void *)
     DriverBehavior behavior{};
     bool have_sample = false;
     TickType_t wake = xTaskGetTickCount();
+    int64_t next_publish_us = 0;
+#if CONFIG_DRIVER_MQTT_GUARD_ENABLED
+    static char wire[4096];
+#endif
     while (true) {
-        vTaskDelayUntil(&wake, pdMS_TO_TICKS(CONFIG_DRIVER_MQTT_INTERVAL_MS));
+        vTaskDelayUntil(&wake, pdMS_TO_TICKS(1000));
+#if CONFIG_DRIVER_MQTT_GUARD_ENABLED
+        if (mqtt_connected.load() && down_subscribed.load() && !driver_message_auth_ready()) {
+            size_t length = 0;
+            if (driver_message_auth_hello(wire, sizeof(wire), length))
+                esp_mqtt_client_enqueue(mqtt, kHelloTopic, wire, length, 1, 0, false);
+        }
+#endif
+        const int64_t now = esp_timer_get_time();
+        if (now < next_publish_us) continue;
+        next_publish_us = now + int64_t(CONFIG_DRIVER_MQTT_INTERVAL_MS) * 1000;
         DriverBehavior newest;
         if (xQueueReceive(latest_behavior, &newest, 0) == pdTRUE) {
             behavior = newest;
@@ -94,6 +197,9 @@ void publish_task(void *)
         if (!mqtt_connected.load()) {
             continue;
         }
+#if CONFIG_DRIVER_MQTT_GUARD_ENABLED
+        if (!driver_message_auth_ready()) continue;
+#endif
 
         // Null values distinguish unavailable observations from false/zero.
         char eyes[8], mouth[8], perclos[20], eye_probability[20], mouth_probability[20], face_luma[8];
@@ -105,12 +211,13 @@ void publish_task(void *)
         std::snprintf(face_luma, sizeof(face_luma), "%u", static_cast<unsigned>(behavior.face_luma));
         char alert_reasons_text[128];
         format_alert_reasons(behavior.alert_reasons, alert_reasons_text);
-        char payload[768];
+        char payload[1024];
         const int size = std::snprintf(
             payload, sizeof(payload),
             "{\"boot_id\":%lu,\"sequence\":%lu,"
             "\"uptime_ms\":%lu,\"driver_present\":%s,\"face_holdover\":%s,"
             "\"scene_luma\":%u,\"face_luma\":%s,"
+            "\"auto_light\":%s,\"ae_level\":%d,\"lighting_state\":\"%s\","
             "\"eyes_valid\":%s,\"eyes_closed\":%s,\"eye_closed_probability\":%s,"
             "\"blink_count\":%lu,\"eye_closed_duration\":%.2f,"
             "\"mouth_valid\":%s,\"mouth_open\":%s,\"mouth_open_probability\":%s,"
@@ -125,6 +232,8 @@ void publish_task(void *)
             behavior.face_holdover ? "true" : "false",
             static_cast<unsigned>(behavior.scene_luma),
             behavior.face_luma_valid ? face_luma : "null",
+            behavior.auto_light ? "true" : "false", static_cast<int>(behavior.ae_level),
+            driver_lighting_state_name(behavior.lighting_state),
             behavior.eyes_valid ? "true" : "false",
             behavior.eyes_valid ? eyes : "null",
             behavior.eyes_valid ? eye_probability : "null",
@@ -145,7 +254,14 @@ void publish_task(void *)
             behavior.perclos_observed_s);
         if (size > 0 && size < static_cast<int>(sizeof(payload))) {
             // Enqueue avoids blocking face detection; send at QoS 1.
+#if CONFIG_DRIVER_MQTT_GUARD_ENABLED
+            size_t length = 0;
+            const uint32_t age = static_cast<uint32_t>(esp_timer_get_time() / 1000) - behavior.uptime_ms;
+            if (driver_message_auth_sample(payload, size, sequence, age, wire, sizeof(wire), length))
+                esp_mqtt_client_enqueue(mqtt, kTopic, wire, length, 1, 0, false);
+#else
             esp_mqtt_client_enqueue(mqtt, kTopic, payload, size, 1, 0, false);
+#endif
         }
     }
 }
@@ -153,13 +269,26 @@ void publish_task(void *)
 
 void driver_telemetry_start()
 {
-    if (CONFIG_DRIVER_WIFI_SSID[0] == '\0' || CONFIG_DRIVER_MQTT_TOKEN[0] == '\0' ||
-        CONFIG_DRIVER_MQTT_URI[0] == '\0') {
+#if CONFIG_DRIVER_MQTT_GUARD_ENABLED
+    const char *uri = CONFIG_DRIVER_GUARD_URI;
+    if (!driver_message_auth_init()) {
+        ESP_LOGE(kTag, "Guard credentials missing or invalid; telemetry disabled");
+        return;
+    }
+#else
+    const char *uri = CONFIG_DRIVER_MQTT_URI;
+    if (!CONFIG_DRIVER_MQTT_TOKEN[0]) return;
+#endif
+    if (CONFIG_DRIVER_WIFI_SSID[0] == '\0' || uri[0] == '\0') {
         ESP_LOGW(kTag, "Wi-Fi/MQTT settings missing; telemetry disabled");
         return;
     }
-    if (std::strncmp(CONFIG_DRIVER_MQTT_URI, "mqtt://", 7) != 0) {
-        ESP_LOGE(kTag, "Use an mqtt:// URI for this build");
+    if (std::strncmp(uri, "mqtts://", 8) != 0) {
+        ESP_LOGE(kTag, "Use an mqtts:// URI, normally mqtts://mqtt.thingsboard.cloud:8883");
+        return;
+    }
+    if (CONFIG_DRIVER_SNTP_SERVER[0] == '\0') {
+        ESP_LOGE(kTag, "An SNTP server is required for TLS certificate date verification");
         return;
     }
     if (std::strlen(CONFIG_DRIVER_WIFI_SSID) > 32 || std::strlen(CONFIG_DRIVER_WIFI_PASSWORD) > 64) {
@@ -191,16 +320,33 @@ void driver_telemetry_start()
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
 
+    esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG(CONFIG_DRIVER_SNTP_SERVER);
+    sntp_config.start = false;
+    ESP_ERROR_CHECK(esp_netif_sntp_init(&sntp_config));
+
     esp_mqtt_client_config_t config = {};
-    config.broker.address.uri = CONFIG_DRIVER_MQTT_URI;
+    config.broker.address.uri = uri;
+#if CONFIG_DRIVER_MQTT_GUARD_ENABLED
+    config.broker.verification.certificate = ingest_root_ca_pem_start;
+    config.credentials.username = CONFIG_DRIVER_GUARD_DEVICE_ID;
+    config.credentials.authentication.password = CONFIG_DRIVER_GUARD_MQTT_PASSWORD;
+    config.credentials.client_id = "guard-" CONFIG_DRIVER_GUARD_DEVICE_ID;
+#else
+    config.broker.verification.certificate = tb_cloud_root_ca_pem_start;
     config.credentials.username = CONFIG_DRIVER_MQTT_TOKEN;
+#endif
+    config.broker.verification.skip_cert_common_name_check = false;
+    // Camera/codec and certificate parsing share memory bandwidth at startup.
+    config.network.timeout_ms = 30000;
     mqtt = esp_mqtt_client_init(&config);
     ESP_ERROR_CHECK(mqtt ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(esp_mqtt_client_register_event(mqtt, MQTT_EVENT_ANY, on_mqtt_event, nullptr));
-    ESP_ERROR_CHECK(esp_mqtt_client_start(mqtt));
-    ESP_ERROR_CHECK(xTaskCreate(publish_task, "driver_mqtt", 4096, nullptr, 3, nullptr) == pdPASS
+    ESP_ERROR_CHECK(xTaskCreate(mqtt_start_task, "mqtt_tls_start", 3072, nullptr, 3,
+                               &mqtt_start_task_handle) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(xTaskCreate(publish_task, "driver_mqtt", 8192, nullptr, 3, nullptr) == pdPASS
                         ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 }
 
 void driver_telemetry_update(const DriverBehavior &behavior)
@@ -220,6 +366,21 @@ bool driver_telemetry_wifi_connected()
     return wifi_connected.load();
 }
 
+bool driver_telemetry_time_synced()
+{
+    return time_synced.load();
+}
+
+int driver_telemetry_tls_error()
+{
+    return tls_error.load();
+}
+
+int driver_telemetry_tls_stack_error()
+{
+    return tls_stack_error.load();
+}
+
 uint32_t driver_telemetry_wifi_disconnect_reason()
 {
     return wifi_disconnect_reason.load();
@@ -234,3 +395,16 @@ uint32_t driver_telemetry_sequence()
 {
     return mqtt_sequence.load();
 }
+
+bool driver_telemetry_guard_enabled()
+{
+#if CONFIG_DRIVER_MQTT_GUARD_ENABLED
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool driver_telemetry_guard_ready() { return driver_message_auth_ready(); }
+uint32_t driver_telemetry_guard_forwarded_sequence() { return driver_message_auth_forwarded_sequence(); }
+uint32_t driver_telemetry_guard_forwarded_count() { return driver_message_auth_forwarded_count(); }

@@ -1,0 +1,3 @@
+amqtt==0.11.3
+paho-mqtt>=2.1,<3
+cryptography>=44,<47

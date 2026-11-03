@@ -21,6 +21,9 @@ public:
     void set_fps(float fps);
     void set_detect_result_cb(const std::function<void(const result_t &)> &result_cb);
     void set_cleanup_func(const std::function<void()> &cleanup_func);
+    // Opt in before run(); callbacks then read a private, stable raw frame.
+    bool enable_frame_snapshot(size_t capacity);
+    void set_frame_filter(const std::function<bool(const dl::image::img_t &)> &filter) { m_frame_filter = filter; }
     bool run(const configSTACK_DEPTH_TYPE uxStackDepth, UBaseType_t uxPriority, const BaseType_t xCoreID) override;
     bool stop_async() override;
     bool pause_async() override;
@@ -40,6 +43,9 @@ private:
     std::function<void(const result_t &)> m_result_cb;
     std::function<void()> m_cleanup;
     SemaphoreHandle_t m_result_cb_mutex;
+    void *m_snapshot_data = nullptr;
+    size_t m_snapshot_capacity = 0;
+    std::function<bool(const dl::image::img_t &)> m_frame_filter;
 };
 } // namespace detect
 } // namespace who

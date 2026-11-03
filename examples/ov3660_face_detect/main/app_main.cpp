@@ -23,6 +23,8 @@ class WhoDetectAppSerial : public WhoDetectAppTerm {
 public:
     explicit WhoDetectAppSerial(WhoFrameCap *frame_cap) : WhoDetectAppTerm(frame_cap)
     {
+        configASSERT(m_detect->enable_frame_snapshot(240 * 240 * 2));
+        m_detect->set_frame_filter(serial_jpeg_stream_validate_frame);
         m_detect->set_detect_result_cb([](const who::detect::WhoDetect::result_t &result) {
             serial_jpeg_stream_send(result);
         });
@@ -34,8 +36,8 @@ public:
         for (const auto &node : m_frame_cap->get_all_nodes()) {
             ok &= node->run(4096, 2, 0);
         }
-        // JPEG conversion, telemetry formatting and face analysis run inside
-        // this callback, so the original 2560-byte Detect stack is too small.
+        // Face analysis and the snapshot submission run here; JPEG/UART have
+        // their own task. Keep the larger stack for behavior analysis.
         ok &= m_detect->run(8192, 2, 1);
         return ok;
     }

@@ -1,5 +1,45 @@
 menu "Driver monitor MQTT"
 
+    config DRIVER_MQTT_GUARD_ENABLED
+        bool "Authenticate telemetry through the local MQTT guard"
+        default n
+        help
+            ESP32 sends signed telemetry to the local TLS gateway. Only the
+            gateway holds the ThingsBoard token and forwards verified data.
+            Run server.mqtt_guard.provision before enabling this option.
+
+    config DRIVER_GUARD_URI
+        string "Local guard MQTTS URI"
+        default ""
+        depends on DRIVER_MQTT_GUARD_ENABLED
+
+    config DRIVER_GUARD_DEVICE_ID
+        string "Guard device ID"
+        default "esp32s3-driver-01"
+        depends on DRIVER_MQTT_GUARD_ENABLED
+
+    config DRIVER_GUARD_KEY_ID
+        string "Guard HMAC key ID"
+        default "key-1"
+        depends on DRIVER_MQTT_GUARD_ENABLED
+
+    config DRIVER_GUARD_HMAC_KEY_HEX
+        string "Private 32-byte HMAC key (64 lowercase hex characters)"
+        default ""
+        depends on DRIVER_MQTT_GUARD_ENABLED
+
+    config DRIVER_GUARD_MQTT_PASSWORD
+        string "Private local MQTT password"
+        default ""
+        depends on DRIVER_MQTT_GUARD_ENABLED
+
+    config DRIVER_MQTTS_REQUIRED
+        bool
+        default y
+        select MQTT_TRANSPORT_SSL
+        select MBEDTLS_HAVE_TIME
+        select MBEDTLS_HAVE_TIME_DATE
+
     config DRIVER_WIFI_SSID
         string "Wi-Fi SSID"
         default ""
@@ -10,10 +50,18 @@ menu "Driver monitor MQTT"
 
     config DRIVER_MQTT_URI
         string "ThingsBoard MQTT URI"
-        default "mqtt://mqtt.thingsboard.cloud:1883"
+        default "mqtts://mqtt.thingsboard.cloud:8883"
         help
-            Public ThingsBoard Cloud MQTT host and port. For a private
-            ThingsBoard server, set its MQTT URI.
+            MQTT over TLS only. The server certificate is verified using
+            main/certs/tb-cloud-root-ca.pem, with hostname and date checks.
+            For a private server, also replace the embedded trusted CA.
+
+    config DRIVER_SNTP_SERVER
+        string "SNTP server for TLS clock synchronization"
+        default "pool.ntp.org"
+        help
+            MQTT starts after the first successful clock synchronization.
+            Camera inference and serial streaming continue while waiting.
 
     config DRIVER_MQTT_TOKEN
         string "ThingsBoard device access token"

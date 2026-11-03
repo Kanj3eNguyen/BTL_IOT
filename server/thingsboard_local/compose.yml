@@ -1,0 +1,39 @@
+name: driver-monitor-local
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: thingsboard
+      POSTGRES_PASSWORD: ${TB_DB_PASSWORD:?Run setup before starting}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d thingsboard"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "2"}
+  thingsboard:
+    image: thingsboard/tb-node:4.3.1.8
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:18884:1883"
+    environment:
+      TB_SERVICE_ID: driver-monitor-local
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/thingsboard
+      SPRING_DATASOURCE_PASSWORD: ${TB_DB_PASSWORD:?Run setup before starting}
+      TB_QUEUE_TYPE: in-memory
+      JAVA_OPTS: "-Xms256m -Xmx1024m"
+    depends_on:
+      postgres: {condition: service_healthy}
+    mem_limit: 2g
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "2"}
+volumes:
+  postgres-data:

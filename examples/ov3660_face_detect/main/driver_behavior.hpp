@@ -18,6 +18,9 @@ struct DriverBehavior {
     bool face_luma_valid = false;
     uint8_t scene_luma = 0;
     uint8_t face_luma = 0;
+    bool auto_light = false;
+    int8_t ae_level = -2;
+    uint8_t lighting_state = 0; // 0 unavailable, 1 adjusting, 2 OK, 3 dark, 4 bright
     float left_eye_aperture = 0;
     float right_eye_aperture = 0;
     float left_eye_dark_fraction = 0;

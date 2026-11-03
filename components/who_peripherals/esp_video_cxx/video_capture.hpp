@@ -330,6 +330,12 @@ public:
      */
     bool get_hflip() const;
 
+    // Camera controls remain owned by this capture device; no second open fd.
+    esp_err_t set_sensor_control(uint32_t ctrl_class, uint32_t id, int32_t value)
+    {
+        return device_.set_control(ctrl_class, id, value);
+    }
+
 private:
     void cleanup(const Config &cfg);
 

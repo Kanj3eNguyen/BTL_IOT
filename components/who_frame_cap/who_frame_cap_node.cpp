@@ -1,4 +1,5 @@
 #include "who_frame_cap_node.hpp"
+#include <cstring>
 #include "hal/cache_hal.h"
 #include "hal/cache_ll.h"
 
@@ -72,6 +73,23 @@ VideoCapture::Frame *WhoFrameCapNode::cam_fb_peek(int index)
     VideoCapture::Frame *ret = m_cam_fbs[index];
     xSemaphoreGive(m_mutex);
     return ret;
+}
+
+bool WhoFrameCapNode::copy_latest_frame(void *destination, size_t capacity, VideoCapture::Frame &snapshot)
+{
+    xSemaphoreTake(m_mutex, portMAX_DELAY);
+    bool copied = false;
+    if (destination && !m_cam_fbs.empty()) {
+        const auto *frame = m_cam_fbs[m_cam_fbs.size() - 1];
+        if (frame && frame->data && frame->size > 0 && frame->size <= capacity) {
+            snapshot = *frame;
+            std::memcpy(destination, frame->data, frame->size);
+            snapshot.data = destination;
+            copied = true;
+        }
+    }
+    xSemaphoreGive(m_mutex);
+    return copied;
 }
 
 void WhoFrameCapNode::add_new_frame_signal_subscriber(task::WhoTask *task)

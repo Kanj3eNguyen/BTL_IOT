@@ -1,4 +1,5 @@
 #include "who_detect.hpp"
+#include "esp_heap_caps.h"
 
 namespace who {
 namespace detect {
@@ -18,6 +19,7 @@ WhoDetect::WhoDetect(const std::string &name, frame_cap::WhoFrameCapNode *frame_
 
 WhoDetect::~WhoDetect()
 {
+    heap_caps_free(m_snapshot_data);
     vSemaphoreDelete(m_result_cb_mutex);
     if (m_model) {
         delete m_model;
@@ -56,6 +58,18 @@ void WhoDetect::set_cleanup_func(const std::function<void()> &cleanup_func)
     m_cleanup = cleanup_func;
 }
 
+bool WhoDetect::enable_frame_snapshot(size_t capacity)
+{
+    void *data = heap_caps_aligned_alloc(16, capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!data) {
+        return false;
+    }
+    heap_caps_free(m_snapshot_data);
+    m_snapshot_data = data;
+    m_snapshot_capacity = capacity;
+    return true;
+}
+
 void WhoDetect::task()
 {
     TickType_t last_wake_time = xTaskGetTickCount();
@@ -75,9 +89,33 @@ void WhoDetect::task()
                 continue;
             }
         }
-        auto fb = m_frame_cap_node->cam_fb_peek();
+        VideoCapture::Frame snapshot{};
+        VideoCapture::Frame *fb = nullptr;
+        if (m_snapshot_data) {
+            if (!m_frame_cap_node->copy_latest_frame(m_snapshot_data, m_snapshot_capacity, snapshot)) {
+                continue;
+            }
+            fb = &snapshot;
+        } else {
+            fb = m_frame_cap_node->cam_fb_peek();
+        }
+        if (!fb) {
+            continue;
+        }
         int64_t timestamp = fb->timestamp;
         dl::image::img_t img = frame2img(fb);
+        if (m_frame_filter && !m_frame_filter(img)) {
+            // Report an invalid observation so a prolonged camera fault cannot
+            // leave an old eye closure/buzzer state active indefinitely.
+            xSemaphoreTakeRecursive(m_result_cb_mutex, portMAX_DELAY);
+            if (m_result_cb) {
+                auto invalid = img;
+                invalid.data = nullptr;
+                m_result_cb({{}, timestamp, invalid});
+            }
+            xSemaphoreGiveRecursive(m_result_cb_mutex);
+            continue;
+        }
         auto &res = m_model->run(img);
         if (m_inv_rescale_x && m_inv_rescale_y && m_rescale_max_w && m_rescale_max_h) {
             rescale_detect_result(res);

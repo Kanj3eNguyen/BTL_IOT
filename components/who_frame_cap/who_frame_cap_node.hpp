@@ -87,6 +87,8 @@ public:
     void set_prev_node(WhoFrameCapNode *node) { m_prev_node = node; }
     void set_next_node(WhoFrameCapNode *node) { m_next_node = node; }
     VideoCapture::Frame *cam_fb_peek(int index = -1);
+    // Copy while holding the same mutex used to return/recycle camera buffers.
+    bool copy_latest_frame(void *destination, size_t capacity, VideoCapture::Frame &snapshot);
     void add_new_frame_signal_subscriber(task::WhoTask *task);
     WhoFrameCapNode *get_prev_node();
     WhoFrameCapNode *get_next_node();

@@ -1,5 +1,11 @@
 # Giải thích mã nguồn theo từng file
 
+**Chế độ guard/local:** xem [cơ chế xác thực MQTT và vai trò các file mới](KE_HOACH_CHONG_GIA_MAO.md)
+và [hướng dẫn chạy local A–Z](CHAY_LOCAL_A_Z.md). Sau khi bo tạo kết quả
+hành vi, `driver_message_auth.cpp` ký thông điệp; gateway trên PC xác minh
+rồi mới chuyển vào ThingsBoard. Các đoạn gửi thẳng ThingsBoard Cloud bên
+dưới áp dụng cho chế độ cũ khi không bật `DRIVER_MQTT_GUARD_ENABLED`.
+
 Tài liệu này dành cho người đã tải repo và muốn hiểu **mỗi file làm gì,
 ai gọi nó, dữ liệu đi qua nó thế nào và chạy lệnh liên quan sẽ tạo ra gì**.
 Các tên hàm và giá trị dưới đây được đối chiếu với mã nguồn trong repo.
@@ -105,7 +111,8 @@ PC thì callback vẫn được gọi; việc mở viewer không khởi động 
 `WhoDetectAppSerial::run()` khởi chạy task lấy ảnh trên core 0, stack 4096,
 và task nhận diện trên core 1, stack 8192. Stack là RAM dành cho lời gọi hàm
 và biến cục bộ của task. Task nhận diện cần stack lớn hơn bản ESP-WHO gốc
-vì callback hiện làm cả phân tích hành vi, định dạng JSON và nén JPEG.
+cho phân tích hành vi và gửi bản chụp sang task stream. Phần nén JPEG và
+ghi UART hiện chạy ở task riêng trên core 0, stack 8192.
 
 File còn có `run_detect_lcd()` và nhánh ESP32-P4 để giữ cấu trúc ví dụ gốc.
 Với cấu hình OV3660/S3 hiện tại, luồng chạy chính là `run_detect_term()`.
@@ -141,8 +148,8 @@ trong `sdkconfig.bsp.esp32_s3_eye_noglib`, sau đó driver sử dụng cấu hì
 Không có lệnh `resize(240, 240)` của OpenCV trên PC để tạo ảnh cho nhận diện.
 FPS hiển thị cuối cùng còn phụ thuộc nhận diện, nén JPEG và tốc độ UART.
 
-Với model mặt, `MODEL_TIME=2`; khi `lcd=false`, số buffer camera là
-`MODEL_TIME + 2 = 4`. Pipeline thêm một `WhoFetchNode` để lấy ảnh và báo
+Với nhánh OV3660/S3 hiện tại, số buffer camera được đặt thành **6** để
+giữ ảnh lâu hơn trong khi model xử lý. Pipeline thêm một `WhoFetchNode` để lấy ảnh và báo
 cho task nhận diện khi có ảnh sẵn sàng. Bộ đệm giúp các bước làm việc lệch
 nhau một chút về thời gian, nhưng không làm khâu xử lý chậm chạy nhanh hơn.
 
@@ -156,11 +163,11 @@ Chỉ đổi kích thước cửa sổ viewer không đổi ảnh gốc trên bo
 Mở [file thực hiện](../examples/ov3660_face_detect/main/serial_jpeg_stream.cpp)
 và [file khai báo](../examples/ov3660_face_detect/main/serial_jpeg_stream.hpp).
 Header công bố hai hàm `serial_jpeg_stream_init()` và
-`serial_jpeg_stream_send(result)`. Comment còn nhắc `testiot.py` từ bản
-thử cũ; trình xem dùng trong repo này là `driver_monitor_viewer.py`.
+`serial_jpeg_stream_send(result)`. Trình xem dùng giao thức gói đã có
+checksum trong `driver_monitor_viewer.py`.
 
 `serial_jpeg_stream_init()` tắt log ứng dụng sau thời điểm chuyển chế độ,
-chuẩn bị UART0 ở **921600 baud**, rồi gọi `alert.init()`. Tắt log giúp hạn
+chuẩn bị UART0 ở **1500000 baud**, rồi gọi `alert.init()`. Tắt log giúp hạn
 chế chữ log trộn vào luồng nhị phân. Dòng chữ khởi động xuất hiện trước đó
 được trình đọc trên PC bỏ qua khi tìm dấu bắt đầu gói.
 
@@ -178,29 +185,42 @@ Mỗi callback gọi `serial_jpeg_stream_send(result)` theo thứ tự thực t�
 
 ```text
 1. analyzer.update(result)          -> đo mắt/miệng, đếm sự kiện, tính PERCLOS
-2. alert.update(behavior)           -> thêm lý do báo và chọn nhịp buzzer
-3. nếu alert trả true              -> analyzer.reset_perclos()
-4. driver_telemetry_update(behavior)-> chuyển trạng thái mới nhất cho MQTT
-5. kiểm tra ảnh RGB565BE 240 × 240
-6. chép ảnh sang vùng PSRAM riêng, vẽ khung mặt trên bản chép
-7. nén bản chép thành JPEG, tạo JSON trạng thái
-8. gửi gói JSON, sau đó gói JPEG qua UART
+2. driver_lighting_update(behavior)-> bù mục tiêu phơi sáng nếu cần
+3. alert.update(behavior)           -> thêm lý do báo và chọn nhịp buzzer
+4. nếu alert trả true              -> analyzer.reset_perclos()
+5. driver_telemetry_update(behavior)-> chuyển trạng thái mới nhất cho MQTT
+6. kiểm tra ảnh RGB565BE 240 × 240
+7. chép ảnh/trạng thái vào một slot PSRAM đang rảnh
+8. thay frame đang chờ bằng frame mới nhất, rồi trả về cho task detect
 ```
 
-Vì bước 1–4 đứng trước kiểm tra/nén ảnh, có thể vẫn cập nhật hành vi và
-MQTT dù một ảnh không được gửi thành công lên viewer. Ngược lại, callback
-chạy đồng bộ trong task nhận diện: nén ảnh hoặc ghi UART lâu sẽ làm task
-nhận diện chậm chuyển sang lượt tiếp theo. Có hai core không loại bỏ
-được mọi điểm chờ trong một task.
+Phần nhận diện/bộ đếm/MQTT được cập nhật trước khi chọn ảnh preview. Callback
+không chờ nén ảnh hay truyền UART xong; vì vậy preview chậm không bắt bộ
+đếm phải chạy cùng FPS với video.
+
+`stream_task()` nhận slot đang chờ, vẽ box, nén bằng `esp_new_jpeg` và gửi
+JSON + JPEG. Có ba slot RGB565 căn hàng 16 byte, mỗi slot 115200 byte:
+một slot có thể đang truyền, một slot đang chờ, một slot để callback chép
+ảnh mới. Queue chờ chỉ có sức chứa một. Khi có ảnh mới hơn, callback trả
+slot chờ cũ về queue rảnh trước khi thay thế, không ghi lên slot đang được
+worker đọc. `stream_dropped` đếm preview được bỏ để ưu tiên độ mới; nó
+khác `Bad UART`, và không có nghĩa bộ phân tích đã bỏ qua sự kiện đó.
 
 Bản ảnh riêng tránh dùng tiếp buffer camera đang có thể được tái sử dụng
 trong lúc nén. Khung mặt phát hiện được vẽ đỏ; khung được giữ tạm khi
 `face_holdover` được vẽ vàng. Thuật toán hành vi đã chạy **trước khi vẽ**,
 nên các nét này không được đưa vào model mắt/miệng ở lượt hiện tại.
 
-`fmt2jpg(..., 55, ...)` tạo ảnh JPEG chất lượng 55. Ảnh lớn hơn 100000
-byte hoặc nén lỗi bị bỏ. Sau khi gửi, vùng nhớ ảnh/JPEG được giải phóng;
-đây là bộ nhớ tạm, không phải album ảnh được lưu trong flash của bo.
+Encoder giữ một handle, nhận RGB565 big-endian và dùng subsampling 4:2:0,
+chất lượng 50. Buffer ảnh và JPEG được cấp phát một lần, tái sử dụng qua
+queue thay vì malloc/free mỗi ảnh. Buffer JPEG tối đa 100000 byte; nén lỗi
+bị bỏ. Đây là bộ nhớ tạm, không phải album ảnh trong flash.
+
+UART có buffer TX 8192 byte và worker chờ truyền hết một frame trước khi
+lấy frame kế. `analysis_hz` cho biết tốc độ callback phân tích; `encode_ms`
+là thời gian nén; `frame_age_ms` là tuổi ảnh từ lúc lấy khỏi driver đến lúc
+chuẩn bị gửi. Tuổi này **chưa gồm thời gian truyền UART sau đó**. Các số này
+giúp phân biệt nghẽn model, codec và băng thông serial.
 
 `write_packet()` tạo giao thức để PC tìm lại ranh giới gói:
 
@@ -213,8 +233,8 @@ byte hoặc nén lỗi bị bỏ. Sau khi gửi, vùng nhớ ảnh/JPEG được
 | Checksum | 4 byte little-endian | FNV-1a 32 bit trên loại gói, độ dài và payload; dùng phát hiện gói bị thay đổi/mất byte. |
 
 Checksum chỉ kiểm tra tính toàn vẹn gói; không yêu cầu bo gửi lại gói hỏng.
-Viewer bỏ gói hỏng rồi tìm gói tiếp theo. Tốc độ 921600 baud ở serial 8N1
-cho trần lý thuyết khoảng 92160 byte/giây, trước các thời gian xử lý khác.
+Viewer bỏ gói hỏng rồi tìm gói tiếp theo. Tốc độ 1500000 baud ở serial 8N1
+cho trần lý thuyết khoảng 200000 byte/giây, trước các thời gian xử lý khác.
 JPEG càng lớn thì càng mất thời gian truyền và FPS càng dễ giảm.
 
 ### 2.4. `driver_behavior.hpp`: dữ liệu kết quả và bộ nhớ qua thời gian
@@ -453,15 +473,47 @@ sequence. Nó không chứa mật khẩu/token cụ thể; giá trị lấy từ
 
 `driver_telemetry_start()` kiểm tra SSID, URI và token. Nếu thiếu thì không
 tạo task mạng; camera vẫn chạy. Phiên bản này chỉ nhận URI bắt đầu bằng
-`mqtt://`. Đổi sang `mqtts://` đòi hỏi sửa phần khởi tạo/TLS tương ứng,
-không chỉ sửa chuỗi trong menu.
+`mqtts://`, mặc định `mqtts://mqtt.thingsboard.cloud:8883`. Chứng chỉ CA
+trong `main/certs/tb-cloud-root-ca.pem` được nhúng bằng `EMBED_TXTFILES` và
+gắn vào `config.broker.verification.certificate`. Client kiểm tra chuỗi CA,
+hostname và thời hạn; không cho rơi về kết nối MQTT thường.
+
+Preset N16R8 đặt `MBEDTLS_EXTERNAL_MEM_ALLOC=y`: buffer TLS và dữ liệu phân
+tích chứng chỉ được cấp phát ở PSRAM, giúp chừa RAM nội cho Wi-Fi, stack
+các task và UART. Đổi cách cấp phát không tắt CA/hostname/thời hạn và
+không làm kết nối thành MQTT thường. Với `sdkconfig` cũ, lựa chọn đã lưu
+vẫn cần đổi qua menuconfig như README hướng dẫn.
+
+Khi có `MQTT_EVENT_ERROR`, file giữ mã `esp_tls_last_esp_err` và
+`esp_tls_stack_err`. Stream xuất `tls_error`, `tls_stack_error`,
+`heap_internal`, `heap_largest` để debug kết nối/bộ nhớ; khi kết nối thành
+công, hai mã lỗi được xóa. Các trường heap là byte, không phải FPS hay
+dung lượng flash. Chúng không được dùng làm ngưỡng cảnh báo tài xế.
 
 Khi cấu hình đủ, hàm khởi tạo NVS, giao diện mạng, event loop và Wi-Fi STA,
-tạo MQTT client với token làm username, tạo task `publish_task`, rồi bắt
-đầu Wi-Fi. `on_wifi_event()` xử lý bắt đầu/mất kết nối và thử kết nối lại;
-khi đã có IP mới đặt `wifi_connected=true`. `on_mqtt_event()` theo dõi MQTT
-kết nối, ngắt/error và bản tin đã được xác nhận. Vì đây là hai giai đoạn,
-Wi-Fi connected chưa đủ kết luận token hoặc broker đang dùng được.
+tạo MQTT client với token làm username, khởi tạo SNTP ở trạng thái chưa
+chạy, tạo task `mqtt_start_task` và `publish_task`, rồi bắt đầu Wi-Fi.
+`on_wifi_event()` xử lý bắt đầu/mất kết nối và thử kết nối lại; khi đã có
+IP mới đặt `wifi_connected=true` và gửi notification cho `mqtt_start_task`.
+
+`mqtt_start_task()` chạy SNTP với `CONFIG_DRIVER_SNTP_SERVER`, đợi kết quả
+theo các đợt 10 giây và đặt `time_synced=true` khi đồng bộ thành công.
+Chỉ sau đó nó gọi `esp_mqtt_client_start()`. Đồng bộ giờ giúp mbedTLS kiểm
+tra chứng chỉ đang trong thời hạn sử dụng thay vì dùng ngày mặc định sau
+khi mất nguồn. Kconfig bắt buộc bật `MQTT_TRANSPORT_SSL`, `MBEDTLS_HAVE_TIME`
+và `MBEDTLS_HAVE_TIME_DATE`. SNTP tiếp tục duy trì giờ trong nền; lần Wi-Fi
+nhận IP sau có thể khởi động lại dịch vụ, còn MQTT client đã chạy tự xử lý
+kết nối lại. Thời gian chờ NTP không giữ task camera.
+
+`on_mqtt_event()` theo dõi MQTT kết nối, ngắt/error và bản tin đã được xác
+nhận. Vì có các bước IP → đồng bộ giờ → TLS → MQTT, Wi-Fi connected chưa
+đủ kết luận broker đang dùng được. Getter `driver_telemetry_time_synced()`
+đưa cờ `time_synced` vào JSON serial; viewer hiện `Time: WAIT` hoặc `Time: OK`.
+
+Giới hạn chờ kết nối TLS được đặt 30 giây; client tự thử lại khi thất bại.
+`esp_wifi_set_ps(WIFI_PS_NONE)` giữ radio thức để giảm độ trễ mạng, đổi lại
+Wi-Fi tiêu thụ điện hơn chế độ modem sleep. Đây là lựa chọn cho bo đang
+chạy giám sát bằng nguồn USB, không phải thay ngưỡng cảnh báo.
 
 `driver_telemetry_update(behavior)` ghi đè vào queue **chỉ có một phần tử**.
 Ví dụ camera đã tạo 20 trạng thái giữa hai lần gửi MQTT: queue giữ trạng
@@ -516,6 +568,41 @@ chính xác. Chỉ số `mqtt_acked` thích hợp hơn cho việc đó.
 Nếu tạo RMT/encoder lỗi thì file log cảnh báo và trả về; không gọi
 `ESP_ERROR_CHECK` để bắt buộc cả ứng dụng dừng chỉ vì đèn báo không dùng được.
 
+### 2.10. `driver_lighting.hpp` và `.cpp`: bù phơi sáng theo mặt
+
+Mở [header](../examples/ov3660_face_detect/main/driver_lighting.hpp) và
+[file thực hiện](../examples/ov3660_face_detect/main/driver_lighting.cpp).
+`frame_cap_pipeline.cpp` gọi `driver_lighting_init(cap)` sau khi camera bắt
+đầu. Hàm dùng `VideoCapture::set_sensor_control()` để gửi control V4L2
+`V4L2_CID_CAMERA_AE_LEVEL` đến OV3660; nếu driver từ chối thì
+`auto_light=false`, không giả báo rằng camera đã được điều chỉnh.
+
+OV3660 đã có vòng tự phơi sáng bên trong cảm biến. Phần bổ sung này đổi
+**mục tiêu** của vòng đó để ưu tiên độ sáng mặt. Driver mặc định mức -2;
+controller chỉ đổi trong -4..3, mỗi lần một mức và cách nhau ít nhất 1,5
+giây. Không có phép tăng sáng ảnh trên PC rồi đưa ngược về bo.
+
+`driver_lighting_update()` đọc `face_luma` khi có mặt vừa phát hiện, làm mượt
+bằng `EMA += 0.15*(mẫu mới-EMA)`, rồi so với dải mục tiêu 105–145/255.
+Thấp hơn thì tăng mục tiêu phơi sáng một mức; cao hơn thì giảm một mức.
+Dải giữa được giữ nguyên để tránh liên tục tăng/giảm. Khi mất mặt ngắn,
+giữ mức cũ; sau ba giây không có mặt mới dùng độ sáng toàn cảnh với dải
+80–155/255, đưa mức AE dần về dải bảo thủ -2..1 để không đuổi theo đèn/trần
+quá tối làm khó tìm lại mặt. Chỉ dùng box mặt đủ 68 × 75 pixel, cùng mức
+kích thước tối thiểu cho phân tích. Khi chuyển từ toàn cảnh sang mặt, khởi tạo lại EMA theo mặt để
+không lẫn hai vùng đo khác nhau.
+
+`lighting_state` gồm `UNAVAILABLE`, `ADJUST`, `OK`, `DARK`, `BRIGHT` (serial
+dùng mã 0..4, MQTT dùng chữ). `ae_level` là mức mục tiêu đang dùng. `OK` chỉ
+có nghĩa phép đo sáng không ở vùng cực đoan và đã hết khoảng chờ điều chỉnh;
+nó không phải điểm xác nhận model nhận đúng mắt/miệng. Những cờ này không
+tự sửa nhãn mở/nhắm, không thay trọng số và không tự học theo người.
+
+Giới hạn vẫn có: khi thiếu sáng vật lý, ngược sáng mạnh hoặc mặt bị che,
+tăng phơi sáng có thể làm nhiễu/mờ mà không khôi phục chi tiết. Bộ đặc trưng
+mắt/miệng vẫn chuẩn hóa theo da như lúc train. Muốn khẳng định độ chính xác
+ở nhiều phòng/người cần video có nhãn từ các điều kiện đó để kiểm tra riêng.
+
 <a id="python"></a>
 
 ## 3. Từng chương trình Python chạy trên PC
@@ -543,15 +630,21 @@ Các hàm làm việc theo thứ tự:
    không kích hoạt giúp nhấn RST trở lại ứng dụng thay vì vào chế độ download.
 2. `main()` đọc từng đoạn byte vào `bytearray`. Một lần `read()` không nhất
    thiết trả đủ một ảnh; buffer giữ phần chưa đủ đến lần đọc tiếp.
+   Trên Windows, helper yêu cầu RX buffer 64 KB để chịu được những lần GUI
+   hoặc scheduler khựng ngắn; nếu driver không hỗ trợ thì dùng buffer mặc định.
 3. `packets()` tìm `AA 55 AA`, đọc loại/độ dài, chờ đủ gói, so checksum.
    Nếu lỗi, dịch một byte rồi tìm dấu tiếp, thay vì tin độ dài sai và bỏ
    luôn đầu gói kế tiếp. JPEG còn cần bắt đầu `FF D8` và kết thúc `FF D9`.
-4. Gói JSON được giải mã thành `state`. Gói JPEG được
-   `cv2.imdecode()` chuyển thành ảnh BGR để OpenCV hiển thị.
+4. Gói JSON được giải mã thành `state`. Trong một lần đọc, chỉ JPEG mới
+   nhất cùng trạng thái đi kèm được `cv2.imdecode()` chuyển thành BGR để
+   hiển thị. Các gói cũ vẫn được kiểm tra; nếu có ghi phiên thì vẫn lưu
+   mọi JPEG, chỉ bỏ bước giải mã/vẽ các preview đã cũ.
 5. `draw()` phóng ảnh từ 240 lên 480 pixel để dễ nhìn, tạo canvas 800 × 506,
    viết các số do bo gửi ở bên cạnh. Phóng ảnh không tạo thêm chi tiết cho model.
 6. `cv2.imshow()` hiện cửa sổ; phím **q** thoát và đóng COM. FPS được ước
-   lượng từ số JPEG giải mã thành công trong khoảng đo khoảng 2 giây.
+   lượng từ số gói JPEG hợp lệ nhận được trong khoảng đo khoảng 2 giây.
+   Chỉ preview mới nhất trong một lô đọc được vẽ; FPS AI là số bo gửi,
+   không phải tốc độ vẽ cửa sổ.
 
 `label()` dùng cờ hợp lệ để hiện `UNKNOWN` thay vì biến mất đo thành mắt
 mở. `alarm_label()` đọc các bit 1/4/8/16; `buzzer_label()` đổi mã nhịp thành
@@ -759,7 +852,7 @@ extension `tools/bsp_ext.py` hoặc chưa chọn cấu hình theo README.
 ### 4.2. `main/CMakeLists.txt`
 
 Mở [CMakeLists của main](../examples/ov3660_face_detect/main/CMakeLists.txt).
-`idf_component_register()` liệt kê 7 file `.cpp` của ứng dụng và các
+`idf_component_register()` liệt kê 8 file `.cpp` của ứng dụng và các
 dependency như UART, GPIO, RMT, Wi-Fi, MQTT và `who_detect_app`.
 `idf_component_optional_requires()` nối component model được chọn với main.
 
@@ -772,7 +865,8 @@ header mà chưa có phần thực hiện được link, có thể gặp `undefi
 
 Mở [manifest](../examples/ov3660_face_detect/main/idf_component.yml).
 File khóa các dependency chính: `esp_video` 2.5.0, `esp_cam_sensor` 2.6.0,
-`esp-dl` 3.3.13, `esp32-camera` 2.1.8, BSP `esp32_s3_eye_noglib` 5.0.2,
+`esp-dl` 3.3.13, `esp32-camera` 2.1.8, `esp_new_jpeg` 1.0.2 cho encoder
+preview, BSP `esp32_s3_eye_noglib` 5.0.2,
 và `human_face_detect` 0.5.0 trong bản repo này.
 
 Component Manager đọc nó để tải mã/binary model vào `managed_components/`
@@ -780,6 +874,11 @@ Component Manager đọc nó để tải mã/binary model vào `managed_componen
 mục thư viện đã tải trên máy cũ. ESP-IDF vẫn phải được cài và cần mạng để
 lấy dependency chưa có. Đổi phiên bản ở đây có thể đổi API hoặc hành vi
 driver; không xem nó như tên trang trí trong tài liệu.
+
+`main/certs/tb-cloud-root-ca.pem` và [README của CA](../examples/ov3660_face_detect/main/certs/README.md)
+là các file dữ liệu/phần giải thích bổ sung cho TLS. PEM được tải từ
+ThingsBoard và nhúng tại build, không phải ảnh train hoặc chứng chỉ client.
+Khi thay CA, cần build và flash để phần trong bộ nhớ bo được thay theo.
 
 ### 4.4. `main/Kconfig.projbuild`
 
@@ -878,7 +977,7 @@ build khi đồ thị component cần chúng; lúc chạy, chỉ đối tượng
 | [`components/who_frame_cap/who_frame_cap_node.hpp`](../components/who_frame_cap/who_frame_cap_node.hpp), [`who_frame_cap_node.cpp`](../components/who_frame_cap/who_frame_cap_node.cpp) | Định nghĩa node chung và các node fetch/decode/resize theo target. `WhoFetchNode::process()` gọi camera lấy frame; giữ frame trong buffer vòng, trả frame cũ, báo sự kiện `NEW_FRAME` cho bên đăng ký. Với OV3660 RGB565 hiện tại pipeline chỉ thêm fetch node. |
 | [`components/who_frame_cap/who_ringbuf.hpp`](../components/who_frame_cap/who_ringbuf.hpp) | Cấu trúc bộ đệm vòng dùng lại các vị trí trong mảng khi đầy. Không lưu toàn bộ video dài trên RAM; chỉ giữ một số frame gần đây theo sức chứa. |
 
-Ví dụ có 4 buffer camera và một ring buffer hữu hạn: camera tiếp tục tạo
+Với 6 buffer camera và một ring buffer hữu hạn ở cấu hình OV3660: camera tiếp tục tạo
 ảnh, node lấy ảnh mới và thay ảnh cũ theo quy tắc. Task nhận diện đợi báo
 `NEW_FRAME`, rồi đọc frame từ node. Nếu model/callback chậm hơn camera,
 hệ thống không cam kết xử lý mọi ảnh mà cảm biến đã chụp. Vì vậy “camera
@@ -905,8 +1004,9 @@ Callback của ứng dụng được gọi **trước khi task quay về chờ �
 Chỉ gọi `set_detect_result_cb()` là đăng ký hàm, chưa thực hiện nhận diện;
 phải gắn model và chạy task để có kết quả.
 
-Phần mạng được tách task, nhưng phân tích mắt/miệng và nén/gửi JPEG vẫn
-nằm trong callback detect. Đây là quan hệ cần nhớ khi điều tra FPS giảm.
+Phần mạng và phần nén/gửi JPEG có task riêng. Callback detect chỉ phân tích
+hành vi, cập nhật bù sáng/cảnh báo và chép một snapshot để gửi. Tuy vậy các
+task vẫn chia sẻ CPU/PSRAM/UART, nên không đồng nghĩa FPS video luôn bằng FPS AI.
 
 ### 5.3. Các file lập lịch `components/who_task/`
 
@@ -1019,7 +1119,8 @@ Thời gian dưới đây là ví dụ minh họa, không phải log đã đo t�
 | Bắt đầu nhắm | `eye_closed_probability()` và bộ lọc trong `driver_behavior.cpp` | Điểm đủ cao làm trạng thái chuyển sang nhắm; ghi mốc bắt đầu. |
 | 0,3 giây sau mở lại | `DriverBehaviorAnalyzer::update()` | Khi trạng thái chuyển về mở, thời gian trong khoảng 0.08–1.2 giây nên `blink_count` tăng một. |
 | Cùng callback | `DriverAlert::update()` | Thấy tổng tăng, ghi timestamp blink, cập nhật window count; chưa có luật báo chỉ vì một blink. |
-| Cùng callback | `driver_telemetry_update()` và phần stream | Queue mạng nhận bản kết quả mới nhất; UART gửi JSON và JPEG để viewer thấy bộ đếm mới. |
+| Cùng callback | `driver_telemetry_update()` và phần stream | Queue mạng nhận bản kết quả mới nhất; callback chép snapshot cho task stream. |
+| Task stream | `stream_task()` | Nén/gửi snapshot mới nhất qua UART để viewer thấy ảnh và bộ đếm; không chặn callback cho đến khi truyền xong. |
 | Chu kỳ mạng kế tiếp | `publish_task()` | Gửi tổng blink hiện tại lên ThingsBoard nếu MQTT connected. |
 
 Nếu FPS thấp đến mức không có mẫu trạng thái nhắm, code không thể đếm
@@ -1115,7 +1216,7 @@ không buộc widget và ảnh viewer cập nhật đúng cùng một thời đi
 | Đổi ngưỡng thời gian báo nhắm | `menuconfig` từ `Kconfig.projbuild`, rồi build/flash; không sửa `build/config/sdkconfig.h`. |
 | Đổi số lần ngáp/cửa sổ đếm | Các mục menu và `driver_alert.cpp`; PERCLOS dùng cửa sổ riêng trong `driver_behavior.cpp`. |
 | Đổi nhịp hoặc thời lượng báo 10/15 giây | `driver_alert.cpp`: `active_pattern()`, `burst_pulse()`, các hằng duration và `buzzer_task()`. |
-| Wi-Fi connected nhưng không có telemetry | `driver_telemetry.cpp`: MQTT state, URI/token, sequence/ACK; Wi-Fi có IP chỉ xác nhận một giai đoạn mạng. |
+| Wi-Fi connected nhưng không có telemetry | `driver_telemetry.cpp`: cờ `time_synced`/SNTP trước, sau đó URI `mqtts://...:8883`, CA, hostname, token và MQTT state/ACK. Wi-Fi có IP chỉ xác nhận một giai đoạn mạng. |
 | Có sequence tăng nhưng ảnh/status không mới | So `uptime_ms` của mẫu và luồng camera; publish task có thể tái sử dụng mẫu cuối khi không có mẫu mới. |
 | Muốn đổi nội dung tiếng Việt của lý do báo | `format_alert_reasons()` trong `driver_telemetry.cpp`; viewer dùng `alarm_label()` riêng. |
 | LED không xanh dù ảnh vẫn chạy | Xem MQTT ACK trước, sau đó RMT/GPIO48 trong `driver_status_led.cpp`; LED không theo mọi frame camera. |
