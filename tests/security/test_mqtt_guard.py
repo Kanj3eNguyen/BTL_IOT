@@ -178,10 +178,28 @@ class GuardTests(unittest.TestCase):
         self.assertIsNone(self.verifier.next_pending())
 
     def test_protocol_vector(self):
-        # Fixed cross-language vector for the firmware's exact bytes and UTF-8.
+        # UTF-8 signing/authentication round trip; the real-board test separately
+        # verifies firmware/server interoperability.
         wire = sign({"v": 1, "type": "vector", "device_id": "test-board", "key_id": "key-1", "text": "Bình thường"}, KEY)
         body, _ = authenticate(wire, DEVICES)
         self.assertEqual(body["text"], "Bình thường")
+
+    def test_demo_identity_is_quarantined_and_duplicate_is_still_detected(self):
+        self.verifier.devices = copy.deepcopy(DEVICES)
+        self.verifier.devices["test-board"]["demo_only"] = True
+        body = self.sample()
+        self.assertEqual(self.send(body)["status"], "ACCEPTED")
+        self.assertIsNone(self.verifier.next_pending())
+        row = self.verifier.db.execute("SELECT id,status FROM outbox").fetchone()
+        self.assertEqual(row["status"], "demo")
+        self.assertIsNone(self.verifier.mark_forwarded(row["id"]))
+        self.assertEqual(self.send(body)["status"], "DUPLICATE")
+
+    def test_sender_cannot_select_demo_quarantine_policy(self):
+        body = self.sample()
+        body["data"]["demo_only"] = True
+        self.assertEqual(self.send(body)["status"], "ACCEPTED")
+        self.assertIsNotNone(self.verifier.next_pending())
 
 
 if __name__ == "__main__":

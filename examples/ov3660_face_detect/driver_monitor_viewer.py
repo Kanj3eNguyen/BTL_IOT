@@ -144,7 +144,12 @@ def main():
     parser.add_argument("--out", type=Path, help="Save JPEG frames and board status while displaying")
     parser.add_argument("--seconds", type=float, default=0,
                         help="Stop after this many seconds; 0 keeps streaming until Q")
+    parser.add_argument("--classic", action="store_true", help="Use the original OpenCV-only video window")
     args = parser.parse_args()
+    if not args.classic:
+        from driver_system_monitor import run
+        run(args)
+        return
     if args.out:
         if (args.out / "frames.jsonl").exists():
             parser.error(f"Existing capture: {args.out}")

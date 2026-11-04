@@ -1,295 +1,292 @@
 # Giám sát tài xế với ESP32-S3-CAM OV3660
 
-**Bản local có xác thực MQTT:** xem [hướng dẫn từ A đến Z](docs/CHAY_LOCAL_A_Z.md)
-để chạy PC làm server ThingsBoard, xác minh HMAC và chống phát lại. Mọi dữ
-liệu server/khóa/build mới đặt trên D; dùng lại công cụ đã có. Hướng dẫn
-MQTTS Cloud bên dưới dành cho chế độ gửi trực tiếp cũ. Chế độ guard gửi
-qua cổng xác minh local trước khi vào ThingsBoard.
+Dự án dùng **ESP32-S3-WROOM-1 N16R8**, camera **OV3660** theo chân
+**ESP32-S3-EYE**, buzzer chủ động **GPIO14, kích hoạt LOW** và LED RGB GPIO48.
+Phát hiện mặt, phân loại mắt/miệng, đếm blink/ngáp, tính PERCLOS và quyết
+định cảnh báo đều chạy trên ESP32-S3. Repo giữ trọng số đã học; không kèm
+ảnh/video/nhãn huấn luyện cá nhân.
 
-Repo này dành cho bo **ESP32-S3-WROOM-1 N16R8** (flash 16 MB, PSRAM 8 MB),
-camera **OV3660** dùng sơ đồ chân **ESP32-S3-EYE**, và module buzzer chủ động
-ở **GPIO14**. Firmware chạy nhận diện mặt, mắt và miệng **ngay trên bo**.
-Máy tính chỉ nhận ảnh cùng kết quả qua cổng USB serial để hiển thị. Bo có thể
-gửi số liệu lên ThingsBoard Cloud qua Wi-Fi 2,4 GHz và **MQTTS (MQTT qua TLS)**.
+**Chế độ được hướng dẫn chính là local có gateway xác minh MQTT**:
 
-Hướng dẫn dưới đây dành cho **Windows 10/11, PowerShell**. Dự án đã được build
-với **ESP-IDF v5.5.5**. Người dùng mới cần Internet ở lần cài đặt và build đầu.
-Không cần máy tính để bo chạy sau khi đã nạp firmware: cắm nguồn USB và có
-Wi-Fi đúng tên/mật khẩu là bo tự hoạt động. Repo **không chứa firmware `.bin`
-đã nạp token cá nhân**; mỗi người build và cấu hình device của mình theo
-các bước dưới đây.
+```text
+Camera → ESP32-S3 → Wi-Fi / MQTTS + HMAC → gateway Python trên laptop
+                                                   ↓
+                                  ThingsBoard + PostgreSQL trong Docker Desktop
+                                                   ↓
+                                     Dashboard tại http://localhost:8080
+ESP32-S3 → USB/COM → viewer Python: ảnh và kết quả đã tính trên bo
+```
 
-**Muốn hiểu hệ thống hoạt động ra sao?** Đọc
-[Hệ thống hoạt động như thế nào?](docs/HE_THONG_HOAT_DONG.md) để xem sơ đồ
-luồng dữ liệu, cách bo nhận diện mắt/miệng, đếm blink và ngáp, tính PERCLOS,
-phát cảnh báo và gửi kết quả qua COM/MQTT. Có thể đọc sau bước 6 khi đã xem
-được stream để đối chiếu các trạng thái trên màn hình.
+Laptop chạy gateway trực tiếp trên Windows, ngoài Docker. Gateway nhận
+MQTTS ở cổng **8885**, cung cấp giờ NTP ở **UDP 123**, kiểm tra HMAC/phiên/
+sequence/độ mới rồi chuyển số liệu vào ThingsBoard. Web 8080 và MQTT 18884
+của ThingsBoard chỉ được publish trên localhost; PostgreSQL dùng mạng Docker.
+Ảnh camera không gửi lên ThingsBoard.
 
-Để hiểu sâu mã nguồn, đọc [Giải thích từng file](docs/GIAI_THICH_TUNG_FILE.md):
-file chạy trên bo hay PC, ai gọi nó, nó nhận/xử lý/trả dữ liệu gì, công thức
-model, cách giữ bộ đếm và ý nghĩa từng lệnh. Có cả hướng dẫn tra lỗi theo
-file và ví dụ lần một blink/ngáp/bản tin MQTT qua các hàm liên quan.
+Bo vẫn nhận diện và báo buzzer khi PC tắt, nhưng **gửi dữ liệu lên ThingsBoard
+local cần laptop, gateway và các container đang chạy**. Viewer không làm
+suy luận trên PC.
 
-Phần bảo vệ dữ liệu: [Cơ chế xác thực và chống phát lại MQTT](docs/KE_HOACH_CHONG_GIA_MAO.md).
-Không triển khai model phát hiện ảnh in/video giả hoặc nhịp tim/SpO₂.
+| Bạn cần làm gì? | Tài liệu |
+| --- | --- |
+| Cắm bo, cài môi trường, cấu hình, build/nạp | Các bước 1–7 dưới đây và [local A–Z](docs/CHAY_LOCAL_A_Z.md) |
+| Hiểu thuật toán, bộ đếm, cảnh báo | [Hệ thống hoạt động](docs/HE_THONG_HOAT_DONG.md) |
+| Hiểu từng file, hàm và lệnh chạy | [Giải thích từng file](docs/GIAI_THICH_TUNG_FILE.md) |
+| Hiểu lớp bảo vệ và giới hạn | [Xác thực và chống phát lại MQTT](docs/KE_HOACH_CHONG_GIA_MAO.md) |
+| Demo các ô bảo mật trên dashboard đang dùng | [Kịch bản demo](docs/DEMO_BAO_MAT_VA_KIEM_THU.md) |
+
+Phạm vi demo bảo mật là **client Python mô phỏng bên gửi → gateway MQTT**,
+đối chiếu thêm dữ liệu ThingsBoard qua REST. Bo thật tiếp tục gửi song song
+để xác nhận đường vận hành; không tuyên bố đã chiếm quyền/tấn công firmware
+ESP32, Wi-Fi, Windows hoặc dashboard. Không triển khai chống ảnh in/video giả,
+nhận dạng danh tính người lái hoặc cảm biến nhịp tim/SpO₂.
 
 ## 1. Chuẩn bị phần cứng
 
-1. Bo ESP32-S3-CAM N16R8 gắn camera OV3660, **đúng sơ đồ chân ESP32-S3-EYE**.
-   Bo N16R8 của hãng khác có thể dùng chân camera khác và sẽ cần sửa firmware.
-2. Cáp USB **có truyền dữ liệu**. Cáp chỉ sạc có thể cấp nguồn nhưng không tạo
-   cổng COM để nạp hoặc xem stream.
-3. Nếu dùng buzzer: nối **chân tín hiệu vào GPIO14**, GND vào GND của bo;
-   cấp nguồn cho module theo thông số của nó. Firmware mặc định dùng buzzer
-   chủ động, kích hoạt ở mức **LOW**. **Không nối buzzer vào GPIO4** vì chân đó
-   là SDA của camera.
-4. Điểm phát Wi-Fi **2,4 GHz**. Nếu dùng hotspot điện thoại, chọn băng tần
-   2,4 GHz trước khi chạy bo.
+1. Bo ESP32-S3-CAM **flash 16 MB, PSRAM 8 MB** và OV3660, đúng chân
+   ESP32-S3-EYE. Tên N16R8 không tự xác định sơ đồ chân của mọi hãng.
+2. Cáp USB có truyền dữ liệu; cáp chỉ sạc không tạo cổng COM.
+3. Buzzer: tín hiệu GPIO14, GND chung, nguồn đúng thông số module. Firmware
+   dành cho buzzer chủ động, kích hoạt LOW. GPIO4 là SDA camera nên không
+   dùng làm tín hiệu buzzer.
+4. Mạng cho ESP32 phải có **2,4 GHz**. PC và bo phải liên lạc được với nhau
+   qua LAN; dùng cùng hotspot là cách dễ kiểm tra. Mạng khách cách ly thiết
+   bị có thể chặn kết nối dù cùng tên Wi-Fi.
 
-## 2. Tải mã nguồn và cài phần mềm trên PC
+## 2. Mã nguồn và phần mềm PC
 
-### 2.1. Lấy repo
+Hướng dẫn dùng Windows 10/11 và PowerShell, đã build với **ESP-IDF 5.5.5**.
+Dùng lại Python/Git/Docker/ESP-IDF sẵn có; chỉ cài phần còn thiếu.
+Mã nguồn, môi trường mới, cache và dữ liệu server của cấu hình này đặt trên D.
 
-Cài [Git for Windows](https://git-scm.com/download/win) nếu máy chưa có Git.
-Trên trang GitHub của repo, chọn **Code → HTTPS**, sao chép URL rồi chạy:
+### 2.1. Tải repo trên máy mới
 
 ```powershell
 cd D:\
-git clone 'https://github.com/Kanj3eNguyen/BTL_IOT.git' ESP32S3_Driver_Monitor_Git
-cd .\ESP32S3_Driver_Monitor_Git
+git clone 'https://github.com/Kanj3eNguyen/BTL_IOT.git' ESP32S3_Driver_Monitor_Ready
+cd D:\ESP32S3_Driver_Monitor_Ready
 ```
 
-URL trên là repo của dự án. Có thể chọn **Code → Download ZIP**, giải
-nén vào một đường dẫn ngắn, không dấu và không khoảng trắng, rồi mở PowerShell
-tại thư mục vừa giải nén. Các lệnh sau giả sử bạn đang ở **gốc repo**.
+Có thể tải ZIP và giải nén thay cho clone. Dùng đường dẫn ngắn, không dấu/
+khoảng trắng. Các ví dụ dùng `D:\ESP32S3_Driver_Monitor_Ready`; đổi đường dẫn
+nếu bạn đặt tên khác. Máy đã có dự án thì dùng thư mục đó, không clone đè.
 
-### 2.2. Cài ESP-IDF v5.5.5
+### 2.2. ESP-IDF, Python và Docker Desktop
 
-Làm theo [hướng dẫn cài ESP-IDF trên Windows cho ESP32-S3](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32s3/get-started/windows-setup.html).
-Chọn đúng phiên bản **v5.5.5** và cài cả công cụ biên dịch. Đường dẫn ESP-IDF
-nên ngắn và không có dấu, ví dụ `D:\esp\v5.5.5\esp-idf`. Bộ cài của Espressif
-có thể cài Python, Git và các công cụ build cần cho ESP-IDF. Xem thêm
-[trang phát hành v5.5.5](https://github.com/espressif/esp-idf/releases/tag/v5.5.5).
+- Cài ESP-IDF 5.5.5 và toolchain theo [hướng dẫn Windows chính thức](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32s3/get-started/windows-setup.html).
+  Ví dụ hiện dùng IDF `D:\esp\v5.5.5\esp-idf`, tools `D:\Espressif`, Python IDF
+  `D:\Espressif\tools\python\v5.5.5\venv`. Chỉ tải source IDF chưa đủ để build.
+- Các script PC dùng Python 3.11. Môi trường build IDF tách khỏi thư viện
+  gateway/viewer. Không cài OpenCV hay phụ thuộc gateway vào Python IDF.
+- Local server dùng Docker Desktop với Linux containers/WSL 2. Trước khi
+  tải images, cấu hình đĩa Docker trên D theo [local A–Z](docs/CHAY_LOCAL_A_Z.md).
+  `Setup-Local.ps1` kiểm tra storage, không tự cài Docker Desktop hoặc chuyển đĩa.
 
-Để xem stream bằng cửa sổ Python, cài riêng **Python 3.11 64-bit** nếu chưa có.
-Bạn có thể lấy từ [Python 3.11.9 trên python.org](https://www.python.org/downloads/release/python-3119/).
-Khi cài, bật **Add Python to PATH**. Kiểm tra:
+### 2.3. Thư viện viewer
+
+Nếu Python đã có `cv2`, `numpy`, `serial`, launcher dùng lại; không cần cài.
+Viewer tổng hợp cần thêm Tkinter, thuộc thành phần Tcl/Tk của bộ cài Python
+Windows; không cài bằng `pip install tkinter`. Có thể dùng `-Classic` nếu
+chỉ cần cửa sổ OpenCV cũ.
+Trên máy mới chưa có môi trường xem ảnh, đứng ở gốc repo:
 
 ```powershell
-py -3.11 --version
-```
-
-### 2.3. Cài thư viện viewer
-
-Đứng tại **gốc repo**, tạo môi trường Python riêng và cài thư viện:
-
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
+python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r .\requirements-viewer.txt
 ```
 
-Chỉ cần chạy ba lệnh này một lần cho mỗi máy. `.venv` nằm trong `.gitignore`.
+`Setup-Local.ps1` sẽ cài thêm phụ thuộc gateway vào `.venv` khi cần. Các lệnh
+quay/train ở mục 8 dùng môi trường này; nếu chỉ xem, `Start-Viewer.ps1` cũng
+có thể chọn Python khác đã đủ thư viện. `.venv` không được commit.
 
-## 3. Cắm bo và tìm cổng COM
+## 3. Cắm bo và tìm COM
 
-1. Cắm cáp USB dữ liệu từ bo vào PC. Đợi Windows nhận thiết bị.
-2. Mở **Device Manager → Ports (COM & LPT)**. Ghi lại cổng hiện ra, ví dụ
-   `COM4` hoặc `COM7`. Có thể kiểm tra trong PowerShell:
-
-   ```powershell
-   [System.IO.Ports.SerialPort]::GetPortNames()
-   ```
-
-3. Nếu không có cổng COM, thử cáp/cổng USB khác. Bo đã thử dùng chip
-   **CH343**; nếu Windows chưa nhận chip này, cài driver USB serial từ nhà
-   sản xuất bo hoặc [trang driver CH343 của WCH](https://www.wch-ic.com/downloads/CH343SER_ZIP.html)
-   rồi cắm lại.
-
-Trong mọi lệnh sau, **thay `COM4` bằng cổng của máy bạn**. Cổng COM chỉ dùng
-để nạp và xem stream; không cần đổi mã nguồn khi chuyển sang máy khác.
-
-## 4. Cấu hình firmware lần đầu
-
-Mở **PowerShell mới** tại gốc repo. Đặt `$IdfPath` thành thư mục ESP-IDF bạn
-đã cài, rồi chạy **trong cùng cửa sổ PowerShell**:
+Cắm cáp dữ liệu, mở **Device Manager → Ports (COM & LPT)** hoặc chạy:
 
 ```powershell
-$IdfPath = 'D:\esp\v5.5.5\esp-idf'
-. (Join-Path $IdfPath 'export.ps1')
-$env:IDF_EXTRA_ACTIONS_PATH = (Resolve-Path '.\tools').Path
-$env:IDF_PY_BUILD_JOBS = '2'
-cd .\examples\ov3660_face_detect
-idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.bsp.esp32_s3_eye_noglib" -DDETECT_MODEL=human_face_detect set-target esp32s3
-idf.py menuconfig
+[System.IO.Ports.SerialPort]::GetPortNames()
 ```
 
-Lệnh `export.ps1` phải báo **Done! You can now compile ESP-IDF projects**.
-Trong `menuconfig`, vào **Driver monitor MQTT** và điền:
+Máy đã thử dùng USB–UART CH343 và COM4. Thay COM4 bằng cổng thực tế của máy
+bạn. Nếu chưa nhận CH343, lấy driver từ nhà sản xuất bo hoặc [WCH](https://www.wch-ic.com/downloads/CH343SER_ZIP.html).
+COM dùng để nạp/xem stream; telemetry dùng Wi-Fi. Mỗi lúc chỉ một chương
+trình mở COM: đóng viewer/recorder/Serial Monitor trước khi nạp.
 
-| Mục | Cần điền |
+## 4. Cấu hình lần đầu và đổi Wi-Fi
+
+Trên máy đã có `sdkconfig`, giữ cấu hình đó; chỉ sửa bằng menuconfig khi
+cần. Trên clone mới, lệnh dưới cấu hình target/BSP/model và mở menu, không
+cần chạy `set-target` để xóa rồi tạo lại dự án.
+
+Mở PowerShell tại gốc repo. Thay các đường dẫn công cụ nếu máy bạn khác:
+
+```powershell
+cd D:\ESP32S3_Driver_Monitor_Ready
+$ProjectRoot = (Get-Location).Path
+$env:IDF_TOOLS_PATH = 'D:\Espressif'
+$env:IDF_PYTHON_ENV_PATH = 'D:\Espressif\tools\python\v5.5.5\venv'
+$env:PYTHONPATH = $null
+. 'D:\esp\v5.5.5\esp-idf\export.ps1'
+$env:IDF_EXTRA_ACTIONS_PATH = Join-Path $ProjectRoot 'tools'
+cd (Join-Path $ProjectRoot 'examples\ov3660_face_detect')
+python (Join-Path $env:IDF_PATH 'tools\idf.py') -B build_guard `
+  -D IDF_TARGET=esp32s3 -D BSP=esp32_s3_eye_noglib `
+  -D DETECT_MODEL=human_face_detect `
+  -D SDKCONFIG_DEFAULTS=sdkconfig.bsp.esp32_s3_eye_noglib menuconfig
+```
+
+Trong **Driver monitor MQTT**, điền **Wi-Fi SSID/password** cho mạng 2,4 GHz.
+Lưu bằng S và thoát Q. Clone mới giữ tùy chọn local guard tắt ở bước bootstrap;
+setup sẽ sinh CA/khóa rồi bật nó. Máy đang chạy guard thì giữ guard đang bật.
+Không cần nhập token ThingsBoard trên bo. File `sdkconfig` chứa bí mật dạng
+chữ và bị Git bỏ qua; không sửa các bản sinh trong `build_guard/config`.
+
+`export.ps1` chỉ kích hoạt công cụ, không tự chuyển bạn khỏi System32 tới
+repo. `set-target` có thể fullclean/tạo lại sdkconfig nên không lặp lại khi
+chỉ đổi Wi-Fi. Save trong menu chưa đổi bo: phải build/nạp ở mục 5.
+
+## 5. Setup local, build và nạp
+
+Quay về gốc repo, lấy IPv4 của Wi-Fi PC **sau khi PC đã nối đúng mạng**:
+
+```powershell
+cd D:\ESP32S3_Driver_Monitor_Ready
+Get-NetIPAddress -InterfaceAlias 'Wi-Fi' -AddressFamily IPv4
+```
+
+Dùng IP thực tế đó, không dùng IP VMware/VPN/localhost. Ví dụ nếu PC nhận
+`172.20.10.4`, setup lần đầu:
+
+```powershell
+.\tools\Setup-Local.ps1 -HostIP 172.20.10.4
+.\tools\Build-Flash.ps1 -Port COM4
+```
+
+Setup tạo CA/chứng chỉ IP SAN, khóa/mật khẩu riêng, cấp tài khoản/device
+ThingsBoard, tạo dashboard, cấu hình guard trong sdkconfig và bật server.
+Token ThingsBoard chỉ gateway giữ. Xem [local A–Z](docs/CHAY_LOCAL_A_Z.md)
+để hiểu marker database, vị trí đĩa và từng tham số.
+
+Build dùng `build_guard`, bật ccache và mặc định **1 job / baud 460800**.
+Đã thử thành công trên bo của dự án với **4 job / baud 921600**:
+
+```powershell
+cd D:\ESP32S3_Driver_Monitor_Ready
+.\tools\Build-Flash.ps1 -Port COM4 -Jobs 4 -Baud 921600
+```
+
+RAM ít thì giảm `-Jobs 1` hoặc `2`, tạm dừng server khi build. Nếu baud cao
+lỗi truyền thì dùng `-Baud 460800`. `-BuildOnly` chỉ biên dịch. Giữ thư mục
+build/cache để lần sau chỉ làm phần đổi; không fullclean thường xuyên.
+Thông báo `Hash of data verified` xác nhận dữ liệu ghi flash; nó chưa xác
+nhận Wi-Fi/MQTT. `Build-Flash.ps1` chuyển cwd tới thư mục ví dụ, nên các lệnh
+`tools` kế tiếp cần `cd` về gốc repo.
+
+## 6. Xem stream và dashboard
+
+```powershell
+cd D:\ESP32S3_Driver_Monitor_Ready
+.\tools\Start-Viewer.ps1 -Port COM4
+```
+
+Launcher tìm Python đã đủ thư viện, tách khỏi môi trường ESP-IDF; có thể
+chỉ định `-Python 'D:\duong-dan\python.exe'`. Ảnh và kết quả lấy từ bo.
+Nhấn Q trong cửa sổ video để đóng/nhường COM.
+
+Mặc định mở **viewer tổng hợp** trong một cửa sổ:
+
+- Camera và tốc độ Video/AI, tuổi ảnh, số gói UART/ảnh nguồn lỗi.
+- ESP32: Wi-Fi, đồng bộ giờ, MQTT/session, sequence/PUBACK/ACK, RAM, TLS,
+  mặt/mắt/miệng, blink/ngáp/PERCLOS và buzzer.
+- Gateway: PID/health, MQTT tới ThingsBoard, outbox, bốn bộ đếm bảo mật;
+  REST cho biết sequence đã lưu và tuổi bản tin.
+- Hai tab log: sự kiện ESP32 suy ra từ JSON serial và quyết định trong audit
+  gateway. Đây không phải toàn bộ log ESP-IDF thô: UART đang truyền JPEG nhị phân.
+
+Đọc serial, đọc health/audit và gọi REST ở các thread riêng. Mất COM sẽ tự
+thử nối lại; dữ liệu health/telemetry cũ được đánh dấu, không giữ trạng thái
+xanh như đang nhận mới. Viewer không start/stop gateway và không chạy suy luận.
+Nút **Mở dashboard** mở trình duyệt local. Đóng viewer vẫn giữ server/bo chạy.
+
+Giao diện dùng Tkinter có sẵn trong thành phần Tcl/Tk của Python Windows,
+không có package pip Tkinter cần cài. Nếu muốn cửa sổ OpenCV cũ:
+
+```powershell
+.\tools\Start-Viewer.ps1 -Port COM4 -Classic
+```
+
+Mở [ThingsBoard local](http://localhost:8080), đăng nhập bằng thông tin riêng
+trong `.private/thingsboard/DANG_NHAP.txt` rồi chọn **Dashboards → BTL IoT ·
+Giám sát tài xế**. Device vận hành tên **ESP32S3 Driver Monitor - Verified**.
+Link dashboard cụ thể của máy nằm ở `.private/thingsboard/dashboard.json`.
+
+| Quan sát | Ý nghĩa |
 | --- | --- |
-| Wi-Fi SSID | Tên mạng Wi-Fi **2,4 GHz** mà bo sẽ kết nối |
-| Wi-Fi password | Mật khẩu mạng trên |
-| ThingsBoard MQTT URI | `mqtts://mqtt.thingsboard.cloud:8883` nếu dùng ThingsBoard Cloud |
-| SNTP server for TLS clock synchronization | Giữ `pool.ntp.org`, hoặc máy chủ NTP mà mạng của bạn truy cập được |
-| ThingsBoard device access token | Token của **device của bạn** trên ThingsBoard |
-| Telemetry publish interval | Có thể để mặc định 5000 ms |
+| WiFi CONNECTED | Bo đã nhận IP từ Wi-Fi; chưa chứng minh tới được PC |
+| Time OK | Bo đã đồng bộ giờ để kiểm tra chứng chỉ |
+| Guard READY | Đã nhận phiên có HMAC hợp lệ từ gateway |
+| `mqtt_acked` tăng | Broker đầu vào đã PUBACK; chưa chứng minh đã chuyển ThingsBoard |
+| `TB seq` / `guard_forwarded_count` tăng, LED nháy xanh | Bo đã nhận ACK ứng dụng có HMAC sau PUBACK của ThingsBoard |
+| Latest telemetry có timestamp mới và VERIFIED | REST/UI đã thấy mẫu được lưu; VERIFIED không chứng minh model đúng |
 
-Nếu chỉ cần xem stream và chưa dùng MQTT, có thể để trống SSID và token;
-viewer vẫn nhận ảnh qua USB, nhưng Wi-Fi/MQTT sẽ hiện offline. Lưu cấu hình
-và thoát `menuconfig`. Tệp `sdkconfig` vừa tạo chứa mật khẩu/token **dạng chữ**;
-repo đã bỏ qua tệp này bằng `.gitignore`. Không đưa `sdkconfig`, ảnh khuôn mặt,
-video, hoặc firmware đã build cùng token thật lên GitHub.
-
-### 4.1. MQTTS, chứng chỉ CA và nâng cấp từ bản MQTT thường
-
-Firmware đã kèm [CA công khai của ThingsBoard](examples/ov3660_face_detect/main/certs/README.md)
-trong `main/certs/tb-cloud-root-ca.pem`. CMake nhúng file này vào firmware;
-bo dùng nó để kiểm tra chuỗi chứng chỉ và hostname của broker. Token device
-vẫn là username MQTT; không cần tạo private key hay chứng chỉ client.
-
-Nếu đã có `sdkconfig` từ bản cũ, chạy `idf.py menuconfig` → **Driver monitor
-MQTT** và đổi URI từ cổng 1883 sang `mqtts://mqtt.thingsboard.cloud:8883`.
-Giá trị cũ đã lưu không tự đổi theo default mới. Giữ SSID/mật khẩu/token
-của bạn, lưu rồi **build và flash** theo mục 5. Firmware mới từ chối URI
-`mqtt://` để tránh vô tình gửi token qua kết nối thường.
-
-Sau khi Wi-Fi nhận IP, task mạng đồng bộ giờ SNTP trước lần kết nối TLS
-đầu tiên để kiểm tra thời hạn chứng chỉ. Camera, nhận diện và stream COM
-vẫn chạy khi đang chờ. Viewer hiện `WiFi: CONNECTED  Time: WAIT` rồi
-`Time: OK`; khi broker kết nối được sẽ hiện `MQTTS: CONNECTED`, ACK tăng
-và LED nháy xanh. Nếu `Time: WAIT` kéo dài, kiểm tra Internet/DNS và NTP
-UDP 123; có thể đổi SNTP server trong menu rồi build/flash lại.
-
-Nếu cần cập nhật CA, chạy ở `examples/ov3660_face_detect`:
+Dashboard dùng counter tích lũy; demo live làm counter tăng thật. Để demo:
 
 ```powershell
-curl.exe -f -S -L -o .\main\certs\tb-cloud-root-ca.pem https://thingsboard.cloud/api/device-connectivity/mqtts/certificate/download
+cd D:\ESP32S3_Driver_Monitor_Ready
+.\tools\Test-LiveSecurity.ps1
 ```
 
-Sau khi thay CA phải build/flash lại; bo không tự tải CA khi khởi động.
-Với server riêng, URI và CA phải thuộc server đó. Không tắt kiểm tra CA,
-hostname hoặc thời hạn chứng chỉ để xử lý lỗi kết nối.
+Đọc [kịch bản demo](docs/DEMO_BAO_MAT_VA_KIEM_THU.md) trước khi trình bày:
+client Python tạo gói tấn công mô phỏng, gateway thật kiểm tra; đây không
+phải bài tấn công giao diện dashboard hoặc chiếm quyền ESP32. Bộ hồi quy
+riêng dùng `Test-Security.ps1 -Demo`, cổng 8886 và device ThingsBoard thử.
 
-Nếu đã có `sdkconfig` riêng và muốn giữ Wi-Fi/token, **không chạy lại
-`set-target`** chỉ để đổi sang TLS. Nếu chưa có cache build trong bản
-nguồn mới, mở PowerShell tại gốc repo và dùng các tham số đầy đủ sau:
+Ba lớp được thử riêng là quyền đăng nhập MQTT, tính toàn vẹn HMAC và chống
+phát lại bằng sequence/session. Gói trùng không tạo thêm mẫu; gói sai bị
+chặn ở gateway trước khi chuyển ThingsBoard, không chỉ bị ẩn trên dashboard.
+Sequence/session không ngăn người đã có đủ mật khẩu và khóa HMAC tạo một
+gói giả mới hợp lệ. Mật khẩu và HMAC hiện cùng nằm trong cấu hình phần mềm.
+Xem [giả định và giới hạn](docs/KE_HOACH_CHONG_GIA_MAO.md#ba-lớp-kiểm-thử-và-ý-nghĩa-thực-tế).
 
-```powershell
-$IdfPath = 'D:\esp\v5.5.5\esp-idf'
-. (Join-Path $IdfPath 'export.ps1')
-$env:IDF_EXTRA_ACTIONS_PATH = (Resolve-Path '.\tools').Path
-$env:IDF_PY_BUILD_JOBS = '2'
-cd .\examples\ov3660_face_detect
-idf.py '-DIDF_TARGET=esp32s3' '-DSDKCONFIG_DEFAULTS=sdkconfig.bsp.esp32_s3_eye_noglib' '-DDETECT_MODEL=human_face_detect' build
-idf.py -p COM4 flash
-```
+Phương án dùng máy ảo cùng LAN được giải thích trong [tài liệu demo](docs/DEMO_BAO_MAT_VA_KIEM_THU.md#11-máy-ảo-cùng-lan-phương-án-mở-rộng-chưa-có-runner-từ-xa).
+Hiện chưa có runner từ xa; các script đang chạy trên laptop. Máy ảo có thể
+dùng CA công khai hiện có, không cần sinh CA riêng cho từng client.
 
-Thay đường dẫn ESP-IDF và cổng COM nếu máy bạn khác. Các tham số được đặt
-trong dấu nháy để PowerShell chuyển nguyên vẹn cho `idf.py`. Lệnh này dùng
-`sdkconfig` đã lưu; nó không xóa Wi-Fi/token như thao tác đổi target có thể làm.
+## 7. Chạy hằng ngày, đổi mạng hoặc máy
 
-> **Chú ý:** `set-target` dùng cho lần đầu hoặc khi đổi target. Chạy lại có
-> thể tạo lại `sdkconfig`, cần nhập lại Wi-Fi/token. Lần build bình thường
-> không chạy lại `set-target`.
-
-### 4.2. Chế độ local có gateway xác minh
-
-Nếu cần kiểm tra HMAC và chống phát lại trước khi ghi telemetry vào
-ThingsBoard, làm theo toàn bộ [hướng dẫn local A–Z](docs/CHAY_LOCAL_A_Z.md).
-Chế độ này không dùng access token ThingsBoard trên firmware: bo kết nối
-MQTTS tới gateway trên PC, còn gateway giữ token đích và chuyển tiếp mẫu đã
-được xác minh tới ThingsBoard local. Mỗi máy/bo phải tự sinh khóa, mật khẩu,
-CA và chứng chỉ trong `.private`; không sao chép các tệp này sang máy khác.
-
-Không trộn `sdkconfig` Cloud với `sdkconfig` local. Sau khi chạy
-`Setup-Local.ps1`, dùng `Build-Flash.ps1` để build vào `build_guard` và nạp
-đúng cấu hình local. Khi quay lại Cloud, chọn URI
-`mqtts://mqtt.thingsboard.cloud:8883` trong `idf.py menuconfig`, rồi
-build/flash lại. Không đưa `sdkconfig`, `.private`, firmware hoặc khóa lên Git.
-
-## 5. Build và nạp lên bo
-
-Vẫn trong **cửa sổ PowerShell ở mục 4**, và đang đứng tại
-`examples\ov3660_face_detect`, chạy:
-
-```powershell
-idf.py build
-idf.py -p COM4 flash
-```
-
-Lần build đầu tải các component từ Espressif Component Registry và có thể mất
-vài phút. Khi nạp xong có dòng **Hash of data verified** và bo tự khởi động
-lại. Nếu COM đang bận, đóng viewer, Serial Monitor hoặc chương trình khác
-trước khi flash. **Không mở `idf.py monitor` cùng lúc với viewer**: cổng này
-truyền gói JPEG nhị phân.
-
-Các lần build sau, mở PowerShell mới rồi chạy lại phần **kích hoạt ESP-IDF và
-đặt `IDF_EXTRA_ACTIONS_PATH`** ở mục 4, `cd` vào dự án, sau đó dùng hai lệnh
-`idf.py build` và `idf.py -p COM4 flash`. Không cần cài lại thư viện viewer.
-
-## 6. Xem stream và kiểm tra kết quả
-
-Sau khi nạp xong và bo khởi động, mở **PowerShell khác** tại gốc repo:
-
-```powershell
-.\.venv\Scripts\python.exe .\examples\ov3660_face_detect\driver_monitor_viewer.py --port COM4
-```
-
-Cửa sổ hiện video camera, khung mặt, FPS, trạng thái mắt/miệng, `blink_count`,
-`yawn_count`, PERCLOS, Wi-Fi, MQTT và số ACK. **Ảnh và việc nhận diện xuất phát
-từ bo**, PC chỉ giải mã và hiển thị. Khi đầu quay quá nghiêng, kết quả mắt
-thiếu tin cậy sẽ hiện `Eyes: UNKNOWN` để tránh đếm blink giả.
-
-Kiểm tra ThingsBoard: mở **ThingsBoard Cloud → Devices → device dùng token ở
-mục 4 → Latest telemetry**. Khi viewer hiện `MQTT: CONNECTED` và `ACK` tăng,
-bo đã được broker xác nhận bản tin QoS 1. Các trường chính gồm `blink_count`,
-`yawn_count`, `perclos`, `alert_reasons`, `sequence` và `boot_id`. Ảnh camera
-không được gửi lên ThingsBoard.
-
-Để đóng viewer, chọn cửa sổ video và nhấn **q**. Bo vẫn chạy và gửi MQTT khi
-viewer đóng, miễn là còn nguồn và Wi-Fi. Để tắt hẳn bo, ngắt nguồn USB.
-
-## 7. Chạy hằng ngày hoặc đổi sang máy khác
-
-Viewer hiện riêng **Video FPS** (preview nhận qua COM) và **AI FPS**
-(tốc độ phân tích trên bo). Nén/gửi JPEG có task riêng, chỉ giữ ảnh mới
-nhất đang chờ; `Skip` là số preview bị thay bằng ảnh mới, còn `UARTbad` là
-gói truyền lỗi. `Age` chưa bao gồm thời gian truyền UART của frame đó.
-
-Camera tự bù mục tiêu phơi sáng dựa trên độ sáng mặt, hoặc toàn cảnh khi
-không có mặt. `Light: ADJUST/OK/DARK/BRIGHT` và `AE` cho biết trạng thái;
-đổi môi trường có thể cần vài giây để ổn định. Cơ chế này hỗ trợ ảnh đầu
-vào, không bảo đảm model đúng ở mọi ánh sáng/người. Không có tính năng tự
-train model trong lúc sử dụng. Xem mục 2.10 của
-[Giải thích từng file](docs/GIAI_THICH_TUNG_FILE.md) để hiểu quy tắc bù sáng.
-
-Luồng preview mới dùng **1.500.000 baud** trên bo và viewer, phù hợp cổng
-CH343 đang dùng. Cần dùng viewer đi kèm bản firmware này; một viewer cũ
-giữ 921.600 baud sẽ không đọc đúng luồng mới. Lệnh mặc định không cần thêm
-`--baud` vì script đã chọn đúng tốc độ.
-
-Preset N16R8 dùng PSRAM cho cấp phát mbedTLS để chừa RAM nội cho Wi-Fi,
-UART và codec. Với cấu hình cũ đã lưu, vào **Component config → mbedTLS →
-Memory allocation strategy → External SPIRAM** rồi build/flash để áp dụng.
-Wi-Fi/token vẫn ở cấu hình cục bộ và không được đưa vào Git.
-
-- **Bo đã nạp firmware:** cắm nguồn USB, chờ khởi động. Không phải build hay
-  flash lại. Để xem stream trên PC khác, cài Python và thư viện viewer theo
-  mục 2.3, tìm cổng COM mới theo mục 3 và thay `COM4` trong lệnh mục 6.
-- **Muốn đổi Wi-Fi hoặc ThingsBoard:** trên PC có ESP-IDF, kích hoạt môi trường
-  như mục 4, vào thư mục dự án và chạy `idf.py menuconfig`. Sửa các mục trong
-  **Driver monitor MQTT**, lưu, rồi `idf.py build` và `idf.py -p COM4 flash`.
-  Chỉ nhấn RST là đủ nếu tên/mật khẩu Wi-Fi **không đổi**.
-- **Muốn ghi lại stream để xem sau:** thêm `--out` và `--seconds`, ví dụ:
+- Bo đã có firmware: cắm nguồn, không cần build/train lại. Bật server:
 
   ```powershell
+  cd D:\ESP32S3_Driver_Monitor_Ready
+  .\tools\Start-Local.ps1
+  ```
+
+- Tắt riêng dịch vụ dự án: `Stop-Local.ps1`, đóng viewer bằng Q, rồi rút
+  nguồn bo. Container/volume và khóa được giữ; Docker Desktop có thể vẫn
+  chiếm RAM trong VmmemWSL. Quit Docker Desktop khi không cần các container.
+- Đổi Wi-Fi: sửa menuconfig theo mục 4, build/nạp. Nếu PC đổi IP, cần cập
+  nhật URI/SNTP/chứng chỉ bằng provision và nạp lại theo [local A–Z](docs/CHAY_LOCAL_A_Z.md).
+  RST chỉ chạy lại firmware đang có, không tự lấy cấu hình mới từ PC.
+  Provision giữ mật khẩu/HMAC cho device hiện có, nhưng sinh lại cả CA và
+  chứng chỉ khi IP đổi; cùng IP và đủ file thì dùng lại. Xem [cơ chế CA](examples/ov3660_face_detect/main/certs/README.md).
+- Chuyển sang PC chỉ xem COM: dùng Python có thư viện viewer, đổi cổng COM.
+  Chuyển **cả server** sang PC khác còn cần setup riêng, khóa/CA/IP phù hợp,
+  cấu hình lại bo; không chỉ đổi COM.
+- Preview hiện Video FPS và AI FPS riêng. UART dùng **1500000 baud**, khác
+  baud nạp 460800/921600. `Age` chưa gồm thời gian truyền UART. Bộ lọc ảnh
+  nguồn, checksum và bỏ preview cũ giúp hạn chế lỗi; không bảo đảm loại được
+  mọi kiểu nhiễu ảnh/JPEG.
+- Bù sáng tự điều chỉnh AE theo mặt/toàn cảnh. Nó không tự train và không
+  bảo đảm đúng ở mọi phòng/góc/người. Xem mục 2.10 của [giải thích từng file](docs/GIAI_THICH_TUNG_FILE.md).
+- Ghi preview để xem lại: dùng Python đã có requirements viewer. Ví dụ với
+  môi trường `.venv` đã cài ở mục 2.3:
+
+  ```powershell
+  cd D:\ESP32S3_Driver_Monitor_Ready
   .\.venv\Scripts\python.exe .\examples\ov3660_face_detect\driver_monitor_viewer.py --port COM4 --out .\examples\ov3660_face_detect\recordings\test_01 --seconds 60
   ```
 
-  Thư mục ghi chứa ảnh mặt; `.gitignore` loại `recordings` khỏi Git. Không
-  mở thêm viewer khác cùng cổng COM.
+  Dữ liệu có ảnh mặt, chỉ giữ cục bộ trong `recordings/` đã bị Git bỏ qua.
 
 ## 8. Ghi video và huấn luyện lại mắt/miệng
 
@@ -304,6 +301,15 @@ Nếu muốn cải thiện model cho người hoặc ánh sáng khác, làm theo
 dưới đây để quay và gắn nhãn dữ liệu của mình. Có thể dùng một lượt video
 mới cho cả mắt và miệng. Những phiên mới trong `recordings/` bị Git bỏ qua;
 `training_data/` cũng được bỏ qua nếu bạn tự tạo lại thư mục này.
+
+Các lệnh quay/train dùng `.venv` có đủ thư viện xử lý ảnh và huấn luyện.
+Chỉ khi muốn huấn luyện lại, chuẩn bị một lần ở gốc repo:
+
+```powershell
+cd D:\ESP32S3_Driver_Monitor_Ready
+if (-not (Test-Path .\.venv\Scripts\python.exe)) { python -m venv .venv }
+.\.venv\Scripts\python.exe -m pip install -r .\requirements-train.txt
+```
 
 ### 8.1. Ghi một lượt video có đủ trạng thái
 
@@ -353,13 +359,7 @@ trên khung hình chưa được train. Nếu mặt mất nét, bị che, hoặc
 
 ### 8.3. Train và xem kết quả
 
-Tại gốc repo, cài thêm thư viện train (một lần):
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r .\requirements-train.txt
-```
-
-Sau đó chạy, dùng đúng `$session` vừa đặt:
+Dùng môi trường đã chuẩn bị đầu mục 8, chạy với đúng `$session` vừa đặt:
 
 ```powershell
 .\.venv\Scripts\python.exe .\examples\ov3660_face_detect\train_driver_model.py --recording $session
@@ -385,8 +385,8 @@ Copy-Item (Join-Path $modelDir 'driver_ml_weights.hpp') (Join-Path $modelDir 'dr
 Copy-Item (Join-Path $modelDir 'driver_ml_weights.candidate.hpp') (Join-Path $modelDir 'driver_ml_weights.hpp')
 ```
 
-Kích hoạt ESP-IDF theo mục 4, vào thư mục firmware rồi chạy `idf.py build`
-và `idf.py -p COM4 flash` như mục 5. Đóng viewer trước khi flash. Sau đó
+Đóng viewer, quay về gốc repo rồi chạy `tools/Build-Flash.ps1 -Port COM4`
+như mục 5 để dùng đúng `build_guard` và cấu hình guard. Sau đó
 thử stream ở cả hai phòng, mắt mở/nhắm và miệng đóng/mở. Nếu kém hơn, chép
 `driver_ml_weights.backup.hpp` trở lại `driver_ml_weights.hpp`, build và flash
 lại. `candidate.hpp` và `backup.hpp` bị Git bỏ qua; `driver_ml_weights.hpp`
@@ -401,35 +401,41 @@ lại. `candidate.hpp` và `backup.hpp` bị Git bỏ qua; `driver_ml_weights.hp
 | PERCLOS | Từ 15% trong 60 giây; ít nhất 30 giây quan sát mắt hợp lệ |
 | Không thấy mặt | Liên tục 5 giây |
 
-Buzzer ở GPIO14 kêu theo nhịp tương ứng. LED RGB ở GPIO48 nháy xanh ngắn khi
-ThingsBoard xác nhận telemetry MQTT. Bộ đếm blink/ngáp bắt đầu lại khi bo
-khởi động lại. `sequence` là số thứ tự gửi trong lần khởi động; dùng cùng
-`boot_id` để phân biệt các lần chạy. Kết quả thị giác là **thử nghiệm**, chưa
+Buzzer ở GPIO14 kêu theo nhịp tương ứng. LED RGB ở GPIO48 nháy xanh khi bo
+nhận ACK ứng dụng có HMAC từ gateway sau PUBACK của ThingsBoard; PUBACK
+chưa phải bằng chứng database đã commit. Bộ đếm blink/ngáp bắt đầu lại khi
+bo khởi động lại. `boot_id` số trong dữ liệu hành vi và `sequence` giúp
+đọc các lần chạy; bảo vệ replay dùng thêm boot nonce, session ID và sequence
+trong phong bì đã ký. Kết quả thị giác là **thử nghiệm**, chưa
 được kiểm định làm thiết bị an toàn khi lái xe.
 
 ## 10. Xử lý lỗi thường gặp
 
 | Hiện tượng | Cách kiểm tra |
 | --- | --- |
-| `idf.py is not recognized` | Chạy `. (Join-Path $IdfPath 'export.ps1')` trong **đúng cửa sổ PowerShell** rồi thử `idf.py --version`. |
+| `idf.py is not recognized` | Kích hoạt ESP-IDF theo mục 4 trong đúng PowerShell; có thể gọi `python (Join-Path $env:IDF_PATH 'tools\idf.py')` như ví dụ. |
 | `BSP is not defined` | Đặt `$env:IDF_EXTRA_ACTIONS_PATH = (Resolve-Path '.\tools').Path` khi đang ở **gốc repo**, rồi vào thư mục dự án. |
-| `cc1plus.exe: out of memory` hoặc assembler báo `memory exhausted` | Máy PC thiếu RAM khi compile ESP-DL. Đặt `$env:IDF_PY_BUILD_JOBS = '1'` trong cửa sổ ESP-IDF rồi chạy lại `idf.py build`; không cần `fullclean`. Đây là lỗi bộ nhớ lúc build trên PC, không phải dung lượng PSRAM trên bo. |
+| `cc1plus.exe: out of memory` hoặc assembler báo `memory exhausted` | Chạy Build-Flash với `-Jobs 1`, dừng server tạm thời nếu thiếu RAM; không fullclean. Đây là RAM PC, không phải PSRAM trên bo. |
 | Không thấy cổng COM | Thử cáp dữ liệu/cổng USB khác; xem Device Manager và driver CH343. |
 | COM đang được dùng | Đóng viewer, trình ghi và Serial Monitor; mỗi lúc chỉ một chương trình mở COM. |
-| Viewer báo thiếu `cv2`, `numpy` hoặc `serial` | Chạy lại ba lệnh ở mục 2.3, và dùng đúng `.venv\Scripts\python.exe`. |
+| Viewer báo thiếu `cv2`, `numpy` hoặc `serial` | Chạy `tools/Start-Viewer.ps1 -Port COM4` để chọn Python đã có thư viện. Chỉ cài requirements-viewer.txt theo mục 2.3 khi chưa có môi trường viewer; không cài vào Python ESP-IDF. |
+| Viewer tổng hợp thiếu `tkinter` | Bổ sung thành phần Tcl/Tk qua bộ cài Python đang dùng hoặc chọn Python có Tkinter bằng -Python; -Classic mở viewer OpenCV cũ. Không pip install tkinter. |
+| Gateway xanh nhưng dữ liệu ThingsBoard mang nhãn CŨ | Gateway còn chạy nhưng chưa có mẫu bo mới, hoặc REST đang không đọc được. Kiểm tra Wi-Fi/time/MQTT/ACK và tuổi telemetry; trạng thái server không thay cho trạng thái bo. |
 | Viewer đứng sau khi nhấn RST | Chờ bo khởi động vài giây. Nếu chưa tự nhận lại, nhấn `q` và mở viewer lại. |
 | `Corrupt JPEG data` hoặc `Bad UART` tăng | Dùng viewer trong repo này, giữ baud mặc định 1500000, thử cáp USB ngắn hơn hoặc cổng USB khác. |
 | `WiFi: OFFLINE`, reason `201` | Bo không thấy SSID; kiểm tra tên mạng và băng 2,4 GHz. Nếu đổi tên/mật khẩu, cấu hình và nạp lại. |
-| `Time: WAIT` khi Wi-Fi đã kết nối | Bo chưa đồng bộ được giờ để kiểm tra chứng chỉ; kiểm tra Internet/DNS/NTP UDP 123 hoặc đổi SNTP server trong menu. |
-| `MQTTS: OFFLINE` khi `Time: OK` | Kiểm tra URI `mqtts://mqtt.thingsboard.cloud:8883`, token của đúng device, CA, hostname và mạng có cho TCP 8883 đi qua không. |
-| `Eyes: UNKNOWN` liên tục | Đưa đủ hai mắt vào khung hình, giảm góc quay đầu, kiểm tra ánh sáng mặt. |
+| `Time: WAIT` khi Wi-Fi đã kết nối | Kiểm tra PC/bo cùng LAN, IP SNTP đúng IP PC hiện tại, gateway đang mở UDP 123; Wi-Fi connected chưa chứng minh tới được gateway. |
+| Guard WAIT hoặc MQTT offline khi Time OK | Kiểm tra URI `mqtts://IP_PC:8885`, CA/IP/thời hạn chứng chỉ và TCP8885; sau khi MQTT nối còn cần hello/grant có HMAC. |
+| Guard READY nhưng TB seq đứng | Kiểm tra container ThingsBoard, MQTT localhost18884, token chỉ ở gateway và log gateway. |
+| Lỗi cryptography khi export ESP-IDF | Không trộn PYTHONPATH của gateway vào IDF. Build-Flash tự xóa PYTHONPATH trước kích hoạt IDF; không cài lại package ngẫu nhiên vào Python IDF. |
+| Mắt KHÔNG RÕ hoặc `Eyes: UNKNOWN` trong classic | Đưa đủ hai mắt vào khung hình, giảm góc quay đầu, kiểm tra ánh sáng mặt. |
 | Camera không lên | Xác nhận đúng OV3660 và chân camera tương thích ESP32-S3-EYE; kiểm tra nguồn USB. |
 
 ## 11. Đưa thư mục này lên GitHub
 
 Thư mục mẫu này đã được `git init`; nếu bạn sao chép chỉ các tệp nguồn sang
 thư mục khác thì chạy `git init` như bên dưới. Repo có `.gitignore` cho
-`sdkconfig`, `build`, `managed_components`, `.venv`, `recordings` và
+`sdkconfig`, `.private`, `build`, `build_guard`, `managed_components`, `.venv`, `recordings` và
 `training_data`. **Không thêm ngoại lệ để commit các tệp đó.** Model đã học
 trong `driver_ml_weights.hpp` được đưa lên Git để người khác build và chạy.
 Trước khi upload, tạo một repo trống trên GitHub, sau đó mở PowerShell tại
@@ -446,26 +452,29 @@ git push -u origin main
 ```
 
 Thay URL bằng repo thật. Trước `git commit`, xem `git status --short`: **không
-được có** `sdkconfig`, `build`, `managed_components`, `.venv`, `recordings`,
-`training_data` hoặc video/ảnh riêng. Nếu Git yêu cầu tên/email, đặt bằng `git config
---global user.name` và `git config --global user.email` theo tài khoản của
-bạn. Bạn cũng có thể chọn repo **Private** nếu chỉ muốn chia sẻ cho nhóm.
+được có** `sdkconfig`, `.private`, `build_guard`, `build`, `managed_components`,
+`.venv`, `recordings`, `training_data`, khóa, CA local của máy hoặc firmware
+chứa bí mật. Nếu Git yêu cầu tên/email, đặt `git config user.name` và
+`git config user.email` riêng trong repo. Repo clone đã có origin thì kiểm
+tra `git remote -v` thay vì thêm origin lần nữa.
 
 ## Cấu trúc repo
 
 ```text
-ESP32S3_Driver_Monitor_Git/
+ESP32S3_Driver_Monitor_Ready/
 ├── README.md                 # Hướng dẫn này
 ├── docs/HE_THONG_HOAT_DONG.md # Giải thích chi tiết cơ chế hệ thống
 ├── docs/GIAI_THICH_TUNG_FILE.md # Vai trò file/hàm, thuật toán và lệnh chạy
 ├── docs/CHAY_LOCAL_A_Z.md    # Chạy ThingsBoard local và MQTT guard
 ├── docs/KE_HOACH_CHONG_GIA_MAO.md # Phạm vi và giới hạn xác thực telemetry
+├── docs/DEMO_BAO_MAT_VA_KIEM_THU.md # Kịch bản live 8885 và hồi quy riêng 8886
 ├── requirements-viewer.txt  # Thư viện Python xem stream
 ├── requirements-train.txt   # Thư viện Python huấn luyện
 ├── requirements-mqtt-guard.txt # Phụ thuộc gateway và kiểm thử guard
 ├── LICENSE                  # Giấy phép nguồn ESP-WHO
 ├── server/                  # Gateway MQTT và công cụ ThingsBoard local
 ├── tests/security/          # Kiểm thử HMAC, replay, TLS và ACL
+├── tests/monitor/           # Kiểm thử health/counter/log của viewer tổng hợp
 ├── tools/                   # Script build/flash, local server và CI
 ├── components/              # Các component ESP-WHO dùng khi build
 └── examples/ov3660_face_detect/
@@ -473,6 +482,7 @@ ESP32S3_Driver_Monitor_Git/
     ├── sdkconfig.bsp.esp32_s3_eye_noglib  # Cấu hình mặc định, không có mật khẩu
     ├── partitions.csv
     ├── driver_monitor_viewer.py
+    ├── driver_system_monitor.py # Camera + ESP32 + gateway/ThingsBoard
     ├── record_training_video.py
     ├── train_driver_model.py
     ├── labels.example.json
@@ -480,5 +490,5 @@ ESP32S3_Driver_Monitor_Git/
 ```
 
 Các thư viện lớn trong `managed_components` và công cụ ESP-IDF được cài/tải
-trên từng máy; không phải commit chúng vào Git. `sdkconfig` riêng của mỗi
-người được tạo khi chạy `set-target`/`menuconfig`.
+trên từng máy; không commit chúng vào Git. `sdkconfig` riêng được tạo/cập
+nhật theo bước cấu hình tại mục 4 rồi được provision điền tham số guard.

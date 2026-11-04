@@ -4,6 +4,8 @@ import asyncio
 import hmac
 import json
 import logging
+import os
+import time
 from logging.handlers import RotatingFileHandler
 import ssl
 from dataclasses import dataclass
@@ -63,6 +65,9 @@ class GuardMessages(BasePlugin):
             return
         try:
             result = RUNTIME.verifier.handle(message.data, device, expected)
+            RUNTIME.last_decision = {"device": device, "reason": result["status"], "at_ms": int(time.time() * 1000)}
+            if result["status"] not in ("SESSION", "ACCEPTED", "DUPLICATE"):
+                RUNTIME.last_rejected = RUNTIME.last_decision.copy()
             LOG.info("device=%s decision=%s", device, result["status"])
             if response := result.get("response"):
                 await self.context.broadcast_message(prefix + "down", response, qos=1)
@@ -76,8 +81,14 @@ class Runtime:
         self.config = config
         self.verifier = Verifier(config["database"], config["devices"])
         self.verify_only = verify_only
-        self.upstream = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="driver-guard-forwarder")
+        self.health_file = Path(config["_health_file"]) if config.get("_health_file") else None
+        self.started_at_ms = int(time.time() * 1000)
+        self.started_monotonic = time.monotonic()
+        self.last_decision = self.last_rejected = self.last_forwarded = None
+        self.last_health_warning = 0.0
         upstream = config["thingsboard"]
+        self.upstream = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                                    client_id=upstream.get("client_id", "driver-guard-forwarder"))
         self.upstream.username_pw_set(upstream["token"])
         # Plain MQTT is allowed only on loopback for the ThingsBoard container
         # on this same PC. Every ESP32/LAN connection still requires TLS.
@@ -126,10 +137,45 @@ class Runtime:
             row = self.verifier.next_pending()
             if row and not self.verify_only and await asyncio.to_thread(self.publish_upstream, row, self.verifier.counts()):
                 ack = self.verifier.mark_forwarded(row["id"])
+                self.last_forwarded = {"device": row["device"], "sequence": row["sequence"], "at_ms": int(time.time() * 1000)}
                 LOG.info("device=%s decision=FORWARDED sequence=%s", row["device"], row["sequence"])
                 if ack:
                     await self.broker.internal_message_broadcast("dm/v1/" + ack[0] + "/down", ack[1], qos=1)
             await asyncio.sleep(0.25)
+
+    def write_health(self, running=True):
+        """Local diagnostic metadata only: never credentials or message payloads."""
+        if not self.health_file:
+            return
+        pending = self.verifier.db.execute("SELECT count(*),min(measured_at) FROM outbox WHERE status='pending'").fetchone()
+        now_ms = int(time.time() * 1000)
+        snapshot = {
+            "running": running, "pid": os.getpid(), "updated_at_ms": now_ms,
+            "started_at_ms": self.started_at_ms, "uptime_s": round(time.monotonic() - self.started_monotonic, 1),
+            "mqtt_bind": self.config["bind"], "ntp_port": self.config.get("ntp_port", 0),
+            "upstream_connected": not self.verify_only and self.upstream.is_connected(),
+            "upstream_host": self.config["thingsboard"]["host"], "upstream_port": self.config["thingsboard"].get("port", 18884),
+            "counts": self.verifier.counts(), "pending_count": pending[0],
+            "oldest_pending_age_ms": max(0, now_ms - pending[1]) if pending[1] else 0,
+            "last_decision": self.last_decision, "last_rejected": self.last_rejected,
+            "last_forwarded": self.last_forwarded,
+        }
+        try:
+            self.health_file.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.health_file.with_suffix(".tmp")
+            temporary.write_text(json.dumps(snapshot), encoding="utf-8")
+            temporary.replace(self.health_file)
+        except OSError as exc:
+            if time.monotonic() - self.last_health_warning >= 30:
+                LOG.warning("Local monitor snapshot unavailable: %s", type(exc).__name__)
+                self.last_health_warning = time.monotonic()
+
+    async def health_loop(self):
+        # Independent of forwarding: a slow/disconnected upstream must not make
+        # the monitor mistake a live gateway for a frozen process.
+        while True:
+            self.write_health()
+            await asyncio.sleep(1)
 
     async def run(self, seconds=0):
         ntp_transport = None
@@ -144,6 +190,7 @@ class Runtime:
         LOG.info("TLS MQTT guard listening on %s; ThingsBoard forwarding %s", self.config["bind"],
                  "DISABLED (test only)" if self.verify_only else "enabled")
         task = asyncio.create_task(self.forward_loop())
+        health_task = asyncio.create_task(self.health_loop()) if self.health_file else None
         try:
             if seconds:
                 await asyncio.sleep(seconds)
@@ -151,11 +198,16 @@ class Runtime:
                 await asyncio.Event().wait()
         finally:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            tasks = [task]
+            if health_task:
+                health_task.cancel()
+                tasks.append(health_task)
+            await asyncio.gather(*tasks, return_exceptions=True)
             await self.broker.shutdown()
             self.upstream.disconnect()
             self.upstream.loop_stop()
             LOG.info("Guard counters: %s", self.verifier.counts())
+            self.write_health(running=False)
             self.verifier.close()
             if ntp_transport:
                 ntp_transport.close()
@@ -170,6 +222,10 @@ def main():
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     LOG.setLevel(logging.INFO)
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    root = Path(__file__).resolve().parents[2]
+    if args.config.resolve() == (root / ".private/mqtt_guard/config.json").resolve():
+        # Test gateways on other config paths do not overwrite the real monitor.
+        config["_health_file"] = str(root / ".private/runtime/gateway-health.json")
     audit = RotatingFileHandler(Path(config["database"]).with_suffix(".audit.log"),
                                maxBytes=5_000_000, backupCount=3, encoding="utf-8")
     audit.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))

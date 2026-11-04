@@ -1,10 +1,9 @@
 # Giải thích mã nguồn theo từng file
 
-**Chế độ guard/local:** xem [cơ chế xác thực MQTT và vai trò các file mới](KE_HOACH_CHONG_GIA_MAO.md)
-và [hướng dẫn chạy local A–Z](CHAY_LOCAL_A_Z.md). Sau khi bo tạo kết quả
-hành vi, `driver_message_auth.cpp` ký thông điệp; gateway trên PC xác minh
-rồi mới chuyển vào ThingsBoard. Các đoạn gửi thẳng ThingsBoard Cloud bên
-dưới áp dụng cho chế độ cũ khi không bật `DRIVER_MQTT_GUARD_ENABLED`.
+**Tài liệu mô tả cấu hình local có `DRIVER_MQTT_GUARD_ENABLED=y`.**
+Bo ký thông điệp; gateway Python chạy nền trên Windows xác minh, rồi chuyển
+ThingsBoard/PostgreSQL trong Docker Desktop. Xem [cơ chế xác thực](KE_HOACH_CHONG_GIA_MAO.md),
+[local A–Z](CHAY_LOCAL_A_Z.md) và [demo/giới hạn kiểm thử](DEMO_BAO_MAT_VA_KIEM_THU.md).
 
 Tài liệu này dành cho người đã tải repo và muốn hiểu **mỗi file làm gì,
 ai gọi nó, dữ liệu đi qua nó thế nào và chạy lệnh liên quan sẽ tạo ra gì**.
@@ -28,7 +27,7 @@ và ví dụ các chỉ số nằm ở [Hệ thống hoạt động](HE_THONG_HO
 
 **Firmware** là chương trình được nạp vào bộ nhớ flash của ESP32-S3. Các
 file C++ trong `main/` cùng một phần thư viện được trình biên dịch ghép
-thành firmware. Bạn chạy `idf.py build` rồi `idf.py -p COM4 flash`; sau đó
+thành firmware. Bạn chạy `tools/Build-Flash.ps1 -Port COM4` từ gốc repo; sau đó
 ESP-IDF gọi `app_main()` khi bo khởi động. Không chạy riêng
 `driver_behavior.cpp` bằng một lệnh Python hoặc bằng nút Run trên PC.
 
@@ -66,7 +65,7 @@ Một số từ được dùng xuyên suốt:
 | Weight / trọng số | Hệ số đã được quá trình train điều chỉnh; firmware dùng chúng để tính điểm trên ảnh mới. |
 | Inference / suy luận | Dùng trọng số có sẵn để dự đoán; diễn ra trên ESP32-S3 mỗi lần xử lý ảnh. |
 | Training / huấn luyện | Dùng ảnh có nhãn để tìm trọng số; chỉ chạy trên PC khi bạn chủ động chạy script train. |
-| ACK | Xác nhận của broker cho bản tin MQTT QoS 1. Nó xác nhận trao đổi MQTT, không xác nhận model nhận diện đúng. |
+| PUBACK / ACK ứng dụng | PUBACK xác nhận trao đổi MQTT QoS1. ACK ứng dụng có HMAC do gateway ký sau PUBACK ThingsBoard; bo kiểm tra ACK này để nháy LED. Cả hai không xác nhận model đúng hoặc database đã commit. |
 
 <a id="firmware"></a>
 
@@ -96,7 +95,9 @@ model do `get_detect_model()` trả về, rồi gọi `run()`. Khi
 Đây là **model tìm mặt và điểm mốc của Espressif**, khác với model mắt/miệng
 nhỏ trong `driver_ml_weights.hpp`.
 
-Lớp `WhoDetectAppSerial` là phần nối quan trọng. Constructor đăng ký:
+Lớp `WhoDetectAppSerial` là phần nối quan trọng. Constructor bật snapshot
+115200 byte, đăng ký bộ lọc ảnh nguồn `serial_jpeg_stream_validate_frame`,
+rồi đăng ký callback:
 
 ```cpp
 m_detect->set_detect_result_cb([](const who::detect::WhoDetect::result_t &result) {
@@ -162,8 +163,8 @@ Chỉ đổi kích thước cửa sổ viewer không đổi ảnh gốc trên bo
 
 Mở [file thực hiện](../examples/ov3660_face_detect/main/serial_jpeg_stream.cpp)
 và [file khai báo](../examples/ov3660_face_detect/main/serial_jpeg_stream.hpp).
-Header công bố hai hàm `serial_jpeg_stream_init()` và
-`serial_jpeg_stream_send(result)`. Trình xem dùng giao thức gói đã có
+Header công bố `serial_jpeg_stream_init()`, bộ lọc
+`serial_jpeg_stream_validate_frame()` và `serial_jpeg_stream_send(result)`. Trình xem dùng giao thức gói đã có
 checksum trong `driver_monitor_viewer.py`.
 
 `serial_jpeg_stream_init()` tắt log ứng dụng sau thời điểm chuyển chế độ,
@@ -232,9 +233,11 @@ giúp phân biệt nghẽn model, codec và băng thông serial.
 | Payload | Theo độ dài | JSON hoặc ảnh JPEG. |
 | Checksum | 4 byte little-endian | FNV-1a 32 bit trên loại gói, độ dài và payload; dùng phát hiện gói bị thay đổi/mất byte. |
 
-Checksum chỉ kiểm tra tính toàn vẹn gói; không yêu cầu bo gửi lại gói hỏng.
+Checksum FNV-1a chỉ giúp phát hiện lỗi truyền ngẫu nhiên; không có khóa,
+không xác thực nguồn và không chống người chủ động sửa gói rồi tính lại checksum.
+Nó không yêu cầu bo gửi lại gói hỏng.
 Viewer bỏ gói hỏng rồi tìm gói tiếp theo. Tốc độ 1500000 baud ở serial 8N1
-cho trần lý thuyết khoảng 200000 byte/giây, trước các thời gian xử lý khác.
+cho trần lý thuyết khoảng 150000 byte/giây (1500000 / 10 bit mỗi byte), trước các thời gian xử lý khác.
 JPEG càng lớn thì càng mất thời gian truyền và FPS càng dễ giảm.
 
 ### 2.4. `driver_behavior.hpp`: dữ liệu kết quả và bộ nhớ qua thời gian
@@ -463,89 +466,64 @@ Mất mặt cần xét thêm khoảng giữ box ở file hành vi: detector mấ
 chưa đồng nghĩa timer vắng mặt bắt đầu ngay. Có thể vẫn còn
 `driver_present=true` trong tối đa 1,2 giây giữ tạm.
 
-### 2.8. `driver_telemetry.hpp` và `.cpp`: Wi-Fi và số liệu ThingsBoard
+### 2.8. `driver_telemetry.hpp` và `.cpp`: Wi-Fi, ký/gửi MQTT và trạng thái
 
 Mở [header](../examples/ov3660_face_detect/main/driver_telemetry.hpp) và
 [file thực hiện](../examples/ov3660_face_detect/main/driver_telemetry.cpp).
-Header cho nơi khác gọi start/update và đọc trạng thái Wi-Fi, MQTT, ACK,
-sequence. Nó không chứa mật khẩu/token cụ thể; giá trị lấy từ `CONFIG_...`
-được tạo bởi menuconfig.
+Header công bố hàm khởi động, cập nhật mẫu và các getter kết nối/ACK cho
+stream. `.cpp` giữ queue trạng thái mới nhất, task mạng và MQTT client.
 
-`driver_telemetry_start()` kiểm tra SSID, URI và token. Nếu thiếu thì không
-tạo task mạng; camera vẫn chạy. Phiên bản này chỉ nhận URI bắt đầu bằng
-`mqtts://`, mặc định `mqtts://mqtt.thingsboard.cloud:8883`. Chứng chỉ CA
-trong `main/certs/tb-cloud-root-ca.pem` được nhúng bằng `EMBED_TXTFILES` và
-gắn vào `config.broker.verification.certificate`. Client kiểm tra chuỗi CA,
-hostname và thời hạn; không cho rơi về kết nối MQTT thường.
+Với guard bật, `driver_telemetry_start()` kiểm tra URI `CONFIG_DRIVER_GUARD_URI`,
+SSID, key ID/HMAC key và mật khẩu MQTT. Nó dùng CA `ingest-root-ca.pem`
+được CMake nhúng, username là guard device ID, password là mật khẩu riêng,
+client ID là `guard-<device_id>`. Token ThingsBoard không dùng ở firmware.
+URI phải bắt đầu `mqtts://`; không hạ xuống MQTT thường khi TLS lỗi.
+Nếu cấu hình thiếu, mạng bị vô hiệu hóa còn camera tiếp tục khởi động.
 
-Preset N16R8 đặt `MBEDTLS_EXTERNAL_MEM_ALLOC=y`: buffer TLS và dữ liệu phân
-tích chứng chỉ được cấp phát ở PSRAM, giúp chừa RAM nội cho Wi-Fi, stack
-các task và UART. Đổi cách cấp phát không tắt CA/hostname/thời hạn và
-không làm kết nối thành MQTT thường. Với `sdkconfig` cũ, lựa chọn đã lưu
-vẫn cần đổi qua menuconfig như README hướng dẫn.
+Hàm chuẩn bị NVS, netif/event loop, Wi-Fi STA và queue một mẫu, khởi tạo
+SNTP chưa chạy, tạo `mqtt_start_task`/`publish_task` rồi bắt đầu Wi-Fi.
+`on_wifi_event()` thử nối lại khi mất mạng; khi DHCP cấp IP, nó đặt
+`wifi_connected=true` và đánh thức task đồng bộ giờ.
 
-Khi có `MQTT_EVENT_ERROR`, file giữ mã `esp_tls_last_esp_err` và
-`esp_tls_stack_err`. Stream xuất `tls_error`, `tls_stack_error`,
-`heap_internal`, `heap_largest` để debug kết nối/bộ nhớ; khi kết nối thành
-công, hai mã lỗi được xóa. Các trường heap là byte, không phải FPS hay
-dung lượng flash. Chúng không được dùng làm ngưỡng cảnh báo tài xế.
+`mqtt_start_task()` bắt đầu SNTP với `CONFIG_DRIVER_SNTP_SERVER`, đợi theo
+đợt 10 giây; chỉ sau đồng bộ thành công mới start MQTT. Thời gian giúp
+mbedTLS kiểm tra hạn chứng chỉ. CA/IP/hostname và ngày chứng chỉ đều được
+kiểm tra; preset dùng PSRAM cho cấp phát TLS để dành RAM nội cho Wi-Fi/UART.
+Timeout mạng là 30 giây; Wi-Fi dùng `WIFI_PS_NONE`. Các task mạng không chặn
+vòng camera. Mã TLS lỗi được giữ trong `tls_error`/`tls_stack_error` để xem
+qua stream; `heap_internal`/`heap_largest` là số byte bộ nhớ, không phải FPS.
 
-Khi cấu hình đủ, hàm khởi tạo NVS, giao diện mạng, event loop và Wi-Fi STA,
-tạo MQTT client với token làm username, khởi tạo SNTP ở trạng thái chưa
-chạy, tạo task `mqtt_start_task` và `publish_task`, rồi bắt đầu Wi-Fi.
-`on_wifi_event()` xử lý bắt đầu/mất kết nối và thử kết nối lại; khi đã có
-IP mới đặt `wifi_connected=true` và gửi notification cho `mqtt_start_task`.
+Sau `MQTT_EVENT_CONNECTED`, bo khởi tạo trạng thái phiên, subscribe
+`dm/v1/<device_id>/down`; chỉ gửi hello khi đã subscribe và chưa có phiên
+còn hạn. Downlink có thể bị chia nhiều MQTT event nên được ghép có giới hạn
+trước khi `driver_message_auth_receive()` kiểm tra HMAC/ngữ cảnh.
 
-`mqtt_start_task()` chạy SNTP với `CONFIG_DRIVER_SNTP_SERVER`, đợi kết quả
-theo các đợt 10 giây và đặt `time_synced=true` khi đồng bộ thành công.
-Chỉ sau đó nó gọi `esp_mqtt_client_start()`. Đồng bộ giờ giúp mbedTLS kiểm
-tra chứng chỉ đang trong thời hạn sử dụng thay vì dùng ngày mặc định sau
-khi mất nguồn. Kconfig bắt buộc bật `MQTT_TRANSPORT_SSL`, `MBEDTLS_HAVE_TIME`
-và `MBEDTLS_HAVE_TIME_DATE`. SNTP tiếp tục duy trì giờ trong nền; lần Wi-Fi
-nhận IP sau có thể khởi động lại dịch vụ, còn MQTT client đã chạy tự xử lý
-kết nối lại. Thời gian chờ NTP không giữ task camera.
+`driver_telemetry_update(behavior)` ghi đè queue **một phần tử**. Camera có
+thể tạo 20 kết quả giữa hai chu kỳ gửi; chỉ mẫu mới nhất được giữ. Publish
+task thức khoảng mỗi giây để chăm sóc hello; mẫu gửi theo khoảng cấu hình
+mặc định 5000 ms, không gửi tất cả ảnh camera:
 
-`on_mqtt_event()` theo dõi MQTT kết nối, ngắt/error và bản tin đã được xác
-nhận. Vì có các bước IP → đồng bộ giờ → TLS → MQTT, Wi-Fi connected chưa
-đủ kết luận broker đang dùng được. Getter `driver_telemetry_time_synced()`
-đưa cờ `time_synced` vào JSON serial; viewer hiện `Time: WAIT` hoặc `Time: OK`.
+1. Đến hạn thì lấy mẫu mới nhất; chưa từng có mẫu thì bỏ lượt.
+2. Tăng sequence kể cả khi MQTT offline. Không có nhật ký offline bền trong flash.
+3. Cần MQTT nối và phiên guard sẵn sàng mới đóng gói telemetry.
+4. Đổi cờ không hợp lệ thành `null`, lý do cảnh báo thành chữ Việt, gắn số
+   lần khởi động/uptime và tính tuổi phép đo.
+5. `driver_message_auth_sample()` bọc/ký JSON; tuổi mẫu trên 15 giây bị bỏ.
+   Gửi tới `dm/v1/<device_id>/telemetry`, QoS1, retain0.
 
-Giới hạn chờ kết nối TLS được đặt 30 giây; client tự thử lại khi thất bại.
-`esp_wifi_set_ps(WIFI_PS_NONE)` giữ radio thức để giảm độ trễ mạng, đổi lại
-Wi-Fi tiêu thụ điện hơn chế độ modem sleep. Đây là lựa chọn cho bo đang
-chạy giám sát bằng nguồn USB, không phải thay ngưỡng cảnh báo.
+Nếu camera ngừng sau một mẫu, code có thể đọc lại mẫu gần nhất nhưng guard
+chặn nó khi quá tuổi; sequence tăng chưa chứng minh camera vẫn tạo ảnh.
+Serial dùng các số/bool để viewer giải nghĩa, còn MQTT có `null` và chữ
+`alert_reasons`; hai định dạng cùng nguồn nhưng không giống mọi trường.
 
-`driver_telemetry_update(behavior)` ghi đè vào queue **chỉ có một phần tử**.
-Ví dụ camera đã tạo 20 trạng thái giữa hai lần gửi MQTT: queue giữ trạng
-thái mới nhất, không bắt broker nhận lại cả 20 trạng thái cũ. Bước ghi này
-không đợi hoàn tất kết nối hoặc truyền bản tin trên mạng.
+`mqtt_acked` tăng ở `MQTT_EVENT_PUBLISHED`: đây chỉ là PUBACK **đầu vào**.
+Trong guard, LED và `guard_forwarded_*` chỉ cập nhật sau ACK ứng dụng có
+HMAC từ gateway, được tạo sau PUBACK ThingsBoard. PUBACK chưa chứng minh
+lưu database; bài kiểm thử đọc REST riêng để đối chiếu.
 
-`publish_task()` chạy chu kỳ mặc định 5000 ms:
-
-1. Đọc trạng thái mới nhất nếu có; nếu chưa từng nhận mẫu nào thì bỏ lượt.
-2. Tăng `sequence` cho chu kỳ có mẫu, kể cả MQTT đang offline.
-3. Nếu MQTT offline, bỏ gửi lượt đó. Code không tạo nhật ký offline bền
-   trên flash để phát lại tất cả mẫu bị bỏ.
-4. Tạo JSON, đổi số đo không hợp lệ thành `null`, đổi bit cảnh báo thành
-   chữ qua `format_alert_reasons()`.
-5. Enqueue lên `v1/devices/me/telemetry` với QoS 1, retain 0. MQTT client
-   xử lý truyền trong nền. `MQTT_EVENT_PUBLISHED` mới tăng ACK và gọi LED.
-
-Nếu camera không còn cung cấp mẫu mới sau khi đã có mẫu trước đó, task này
-có thể dùng lại mẫu gần nhất. Khi đọc dashboard cần nhìn cả `uptime_ms`
-của mẫu; chỉ có sequence tăng không chứng minh camera vẫn tạo ảnh mới.
-
-Trong JSON mạng, `alert_reasons` là chữ; `alert_reasons_mask` là số bit.
-Trong JSON serial, `alert_reasons` vẫn là số để viewer đổi sang nhãn. Serial
-giữ các trường số/bool cùng cờ `*_valid`, còn MQTT có thêm `null` cho số đo
-không dùng được. Hai định dạng có cùng nguồn kết quả nhưng không giống hệt
-tên và kiểu mọi trường.
-
-`boot_id` là số ngẫu nhiên tạo khi khởi động phần telemetry; sequence và
-ACK nằm trong RAM. Cùng `boot_id` mà sequence nhảy 10 → 14 có thể cho thấy
-ba chu kỳ không đến dashboard. QoS 1 có thể giao lại bản tin, nên khi cần
-loại trùng nên dùng cặp `(boot_id, sequence)`. LED/ACK không phải xác nhận
-rằng một widget đã cập nhật hay rằng người quản trị đã đọc cảnh báo.
+`boot_id` số 32 bit trong dữ liệu hành vi khác `boot_id` nonce128bit trong
+phong bì xác thực. Khóa replay phía server dựa trên device/session/sequence
+và digest; không thay bằng cặp boot_id số/sequence trên widget.
 
 ### 2.9. `driver_status_led.hpp` và `.cpp`: LED báo ACK MQTT
 
@@ -559,11 +537,13 @@ không thể coi nó như đèn một màu chỉ `gpio_set_level(48, 1)`. Hàm
 `write_pixel(green)` gửi ba byte `{green, 0, 0}`; RMT tạo xung theo cấu hình.
 Độ sáng xanh hiện là 24/255.
 
-Khi phần MQTT nhận ACK, `driver_status_led_mqtt_published()` gửi thông báo
+Khi bo nhận và xác minh ACK ứng dụng có HMAC sau PUBACK ThingsBoard,
+`driver_status_led_mqtt_published()` gửi thông báo
 cho task LED. Task thức, bật xanh, chờ 150 ms rồi tắt. Việc chờ nằm trong
 task LED nên callback MQTT không bị giữ lại suốt 150 ms. Với ACK đến sát
 nhau, notification có thể được gom; không dùng mắt đếm nháy làm số bản tin
-chính xác. Chỉ số `mqtt_acked` thích hợp hơn cho việc đó.
+chính xác. Với đường guard, dùng `guard_forwarded_count` cho số ACK ứng
+dụng mới; `mqtt_acked` chỉ đếm PUBACK broker đầu vào.
 
 Nếu tạo RMT/encoder lỗi thì file log cảnh báo và trả về; không gọi
 `ESP_ERROR_CHECK` để bắt buộc cả ứng dụng dừng chỉ vì đèn báo không dùng được.
@@ -603,19 +583,26 @@ tăng phơi sáng có thể làm nhiễu/mờ mà không khôi phục chi tiết
 mắt/miệng vẫn chuẩn hóa theo da như lúc train. Muốn khẳng định độ chính xác
 ở nhiều phòng/người cần video có nhãn từ các điều kiện đó để kiểm tra riêng.
 
-### 2.11. `driver_frame_guard.hpp`: giới hạn dữ liệu trong một frame
+### 2.11. `driver_frame_guard.hpp`: heuristic loại một kiểu lỗi ảnh nguồn
 
 Mở [driver_frame_guard.hpp](../examples/ov3660_face_detect/main/driver_frame_guard.hpp).
-Header này giữ các giới hạn dùng chung khi tạo telemetry: kích thước payload,
-tuổi mẫu và các giá trị số được phép. Nó không xác thực nguồn gửi và không
-thay HMAC; mục đích là để firmware không đóng gói dữ liệu vượt giới hạn
-trước khi chuyển sang lớp MQTT hoặc serial.
+`driver_frame_quality()` lấy mẫu các cặp pixel RGB565 ở nhiều hàng, so độ
+khác màu giữa pixel lân cận theo thứ tự byte gốc và thứ tự đảo. Một hàng
+bị coi đáng ngờ nếu chênh lệch gốc ≥40 và chênh lệch khi đảo dưới 45% của
+mức gốc; cần ít nhất hai hàng đáng ngờ để loại frame.
+
+Đây là dấu hiệu heuristic cho lỗi pha byte đã gặp, không phải detector mọi
+loại nhiễu. Nó không sửa byte để đưa ảnh phỏng đoán vào model. Bộ lọc được
+đăng ký trước model mặt; khi loại ảnh, callback nhận quan sát không hợp lệ
+để trạng thái mắt/buzzer cũ không bị giữ vô hạn và JPEG lỗi không được gửi.
+`camera_bad_frames` tăng khi bộ lọc loại ảnh. Checksum UART ở bước truyền là
+một lớp khác; cả hai không thay HMAC MQTT hoặc phát hiện ảnh/video giả.
 
 ### 2.12. `driver_message_auth.hpp` và `.cpp`: ký và xác minh MQTT guard
 
 Mở [header](../examples/ov3660_face_detect/main/driver_message_auth.hpp) và
 [file thực hiện](../examples/ov3660_face_detect/main/driver_message_auth.cpp).
-Module này tạo `boot_id`, ký hello/telemetry bằng HMAC-SHA256 theo định dạng
+Module này tạo boot nonce128bit (khác boot_id số trong data), ký hello/telemetry bằng HMAC-SHA256 theo định dạng
 DM-MQTT-1, rồi xác minh grant và ACK có đúng device, request, boot và phiên
 hay không. Khóa HMAC, key ID và mật khẩu MQTT chỉ lấy từ `CONFIG_...` trong
 `sdkconfig`; không ghi chúng vào serial hoặc log.
@@ -623,8 +610,8 @@ hay không. Khóa HMAC, key ID và mật khẩu MQTT chỉ lấy từ `CONFIG_..
 Ở chế độ guard, hello được gửi trước telemetry và bo chỉ báo
 `guard_ready` sau khi nhận grant hợp lệ. ACK chỉ tăng
 `guard_forwarded_sequence`/`guard_forwarded_count` sau khi gateway xác nhận
-đã chuyển tiếp mẫu. Khi guard tắt, các hàm này trả trạng thái rỗng để đường
-Cloud cũ vẫn hoạt động.
+đã nhận PUBACK của ThingsBoard cho mẫu đó. Đây là HMAC phần mềm qua
+mbedTLS; chưa dùng khóa eFuse hay peripheral HMAC phần cứng.
 
 ### 2.13. Chế độ guard trong `driver_telemetry.cpp`
 
@@ -634,17 +621,17 @@ token ThingsBoard từ firmware. Gateway cấp phiên có hạn, kiểm tra fres
 và sequence, rồi mới chuyển mẫu tới ThingsBoard local. Khi cấu hình guard
 không đầy đủ, task mạng báo lỗi và không giả lập trạng thái đã xác minh.
 
-Khi guard tắt, module giữ đường MQTTS Cloud: token device là username MQTT,
-CA Cloud được nhúng và telemetry đi tới topic ThingsBoard chuẩn. Hai đường
-đều dùng SNTP/TLS; khác nhau ở nơi giữ token đích và bước xác minh trước khi
-ghi dữ liệu.
+Cấu hình local yêu cầu bật guard sau provision. Nếu tắt guard hoặc bỏ
+qua provision, không dùng các trạng thái rỗng để kết luận bản tin đã được
+xác thực theo giao thức local được mô tả ở đây.
 
 <a id="python"></a>
 
 ## 3. Từng chương trình Python chạy trên PC
 
-Các lệnh dưới đây chạy từ **gốc repo**, sau khi đã tạo `.venv` và cài thư
-viện theo README. Thay COM4 bằng cổng thật. Mỗi lần chỉ mở một script dùng
+Các lệnh dưới đây chạy từ **gốc repo**. Viewer hằng ngày dùng launcher tự
+chọn Python đã đủ thư viện; các lệnh quay/train trực tiếp dùng `.venv` đã
+cài requirements tương ứng theo README. Thay COM4 bằng cổng thật. Mỗi lần chỉ mở một script dùng
 cổng COM đó. `--help` cho biết tham số mà không mở camera hay nạp firmware.
 
 ### 3.1. `driver_monitor_viewer.py`: đọc gói serial và vẽ kết quả lên màn hình
@@ -653,11 +640,30 @@ Mở [driver_monitor_viewer.py](../examples/ov3660_face_detect/driver_monitor_vi
 Đây là chương trình dùng hằng ngày để xem trực quan:
 
 ```powershell
-.\.venv\Scripts\python.exe .\examples\ov3660_face_detect\driver_monitor_viewer.py --port COM4
+.\tools\Start-Viewer.ps1 -Port COM4
 ```
 
 **Đầu vào:** byte từ UART của bo. **Đầu ra:** cửa sổ ảnh và bảng trạng thái;
 nếu có `--out`, thêm các JPEG và `frames.jsonl` trên đĩa PC.
+
+`main()` mặc định chuyển sang [driver_system_monitor.py](../examples/ov3660_face_detect/driver_system_monitor.py)
+để mở viewer tổng hợp Tkinter. Module này có SerialReader đọc/kiểm tra gói,
+ServerReader đọc health/audit và ApiReader gọi REST trong các thread riêng;
+UI thread chỉ dựng ảnh/nhãn. Store giữ bản mới nhất và log hữu hạn. COM mất
+thì reader tự thử lại, trạng thái ESP32 quá 2 giây hoặc health quá 6 giây được coi cũ.
+API offline và mẫu ThingsBoard cũ được hiển thị riêng, không giả là mất gateway.
+
+`driver_system_monitor.py` không nhận MQTT thay bo và không tính lại mắt/
+miệng trên PC. SerialReader cung cấp ảnh mới nhất cùng JSON, ServerReader
+đọc health/audit local, ApiReader đăng nhập REST bằng cấu hình riêng của
+laptop để đối chiếu sequence đã lưu. REST chỉ đọc telemetry; yêu cầu đăng
+nhập dùng POST để lấy token. Token không được hiển thị hoặc đưa vào log.
+Các số counter lấy từ gateway có thể mới hơn số trên ThingsBoard. Mỗi API
+call có timeout 3 giây và reader đợi 3 giây giữa các lượt, không chặn UI.
+
+`--classic` giữ vòng OpenCV dưới đây; các hàm parser/draw cũng tiếp tục được
+recorder/diagnostic/export dùng. Vì vậy canvas 800×506 bên dưới là của bản
+classic/export, không phải kích thước cửa sổ tổng hợp có thể thay đổi.
 
 Các hàm làm việc theo thứ tự:
 
@@ -868,21 +874,81 @@ Ví dụ sau khi đã ghi bằng viewer vào `review_01`:
 Kết quả mặc định là `review_01/review_stream.avi`. Quy trình train trong
 README dùng `training_video.avi` từ recorder để gắn nhãn thời gian chính xác.
 
-### 3.7. Gateway và ThingsBoard local
+### 3.7. Gateway Python trên laptop: nhận, xác minh, giữ mẫu chờ gửi
 
-Các file trong [server/mqtt_guard](../server/mqtt_guard) chạy trên PC, không
-chạy trên ESP32. `protocol.py` giữ định dạng byte ký và parser chặt;
-`verifier.py` quản lý phiên, freshness, sequence và SQLite outbox;
-`gateway.py` cung cấp MQTT TLS/ACL, gọi verifier và chuyển mẫu hợp lệ tới
-ThingsBoard. `ntp.py` cung cấp giờ bootstrap trong LAN; `provision.py` sinh
-khóa, CA/chứng chỉ và cấu hình `sdkconfig`.
+Gateway **không phải một bo riêng** và không phải container ThingsBoard.
+`Start-Local.ps1` chạy `python -m server.mqtt_guard.gateway --config ...` ở
+nền trên Windows. Python có thể là công cụ đã cài trên C; source/config/
+SQLite/log của dự án vẫn nằm trên D. Gateway nghe TLS 8885 và UDP 123.
 
-Các file trong [server/thingsboard_local](../server/thingsboard_local) dùng
-REST local để tạo tài khoản/device và dựng dashboard. Các script
-[Setup-Local.ps1](../tools/Setup-Local.ps1), [Start-Local.ps1](../tools/Start-Local.ps1),
-[Stop-Local.ps1](../tools/Stop-Local.ps1) chỉ điều khiển dịch vụ local và
-giữ dữ liệu/khóa trong `.private`. Không đặt token, mật khẩu hoặc private key
-trong source hay tài liệu commit lên Git.
+| File | Đầu vào → xử lý → kết quả |
+| --- | --- |
+| [protocol.py](../server/mqtt_guard/protocol.py) | Wire JSON/base64 → giới hạn kích thước, từ chối JSON trùng key/sai số, chọn device/key ID, so HMAC đúng byte → body đã xác thực và digest hoặc lý do từ chối. |
+| [verifier.py](../server/mqtt_guard/verifier.py) | Body đã xác thực → kiểm tra ngữ cảnh, phiên, sequence, timestamp, tuổi mẫu và schema → ghi sequence/outbox trong cùng transaction SQLite; gói sai chỉ tăng counter/lý do. |
+| [gateway.py](../server/mqtt_guard/gateway.py) | MQTT client → xác thực password/client ID, ACL topic, gọi verifier sau ACL → worker gửi mẫu pending tới ThingsBoard; sau PUBACK đánh dấu sent và ký ACK. |
+| [ntp.py](../server/mqtt_guard/ntp.py) | Gói NTP client48byte → trả giờ PC → giúp bo bootstrap giờ TLS. Chưa có xác thực NTP riêng. |
+| [provision.py](../server/mqtt_guard/provision.py) | IP PC và sdkconfig → sinh/giữ khóa, mật khẩu, CA/cert IP SAN, cập nhật sdkconfig/CA nhúng → cấu hình riêng trong .private và firmware build tiếp theo. |
+
+Trong provision, cùng host và đủ các file/marker được kiểm tra thì bộ CA/
+server được dùng lại. Khi host đổi hoặc thiếu file, code hiện sinh lại cả
+CA và cert server, nhưng giữ HMAC/password của device có sẵn. CA hạn 3650
+ngày, cert server 365 ngày; nhánh dùng lại không tự xét hạn/gia hạn. CA PEM
+được nhúng chỉ là điểm tin cậy công khai, không phải chứng chỉ client mTLS.
+Xem [vòng đời chứng chỉ](../examples/ov3660_face_detect/main/certs/README.md).
+
+`state.sqlite3` giữ session hiện tại, request hello đã thấy, outbox và
+counter bền qua restart gateway. `next_pending()` không lấy mẫu quá hạn;
+không gửi lại mẫu cũ như dữ liệu mới. Gói trùng từ bo không tạo hàng mới.
+Nếu PC sập giữa PUBACK upstream và mark-sent, cùng mẫu/timestamp vẫn có
+thể được gửi lại: không có bảo đảm exactly-once toàn tuyến.
+
+Gateway chính còn có health_loop độc lập với forward_loop. Nó xuất file
+JSON metadata mỗi giây bằng thay thế file tạm: PID, tuổi tiến trình, kết nối
+upstream, counter, outbox và quyết định gần nhất. Không xuất credentials,
+MAC hay payload. Do chạy riêng, upstream bị timeout không làm health đứng.
+Chỉ config gateway chính tạo file này; gateway hồi quy riêng không đè lên.
+
+Chế độ live demo thêm danh tính quản trị `demo_only=true`. Verifier vẫn
+xác minh mẫu và replay bình thường nhưng ghi mẫu chuẩn với status `demo`
+ngay trong transaction, không cho vào hàng đợi `pending`. Cờ trong payload
+không điều khiển chính sách này. Các gói lỗi vẫn tăng counter gateway thật.
+
+### 3.8. ThingsBoard local, các script vận hành và script kiểm thử
+
+| File | Chạy ở đâu và có ý nghĩa gì? |
+| --- | --- |
+| [compose.yml](../server/thingsboard_local/compose.yml) | Docker Desktop tạo ThingsBoard 4.3.1.8 / PostgreSQL 18, volume database, giới hạn RAM/log; publish web 8080 / MQTT 18884 trên localhost. |
+| [setup.py](../server/thingsboard_local/setup.py) | Python gọi REST để đổi mật khẩu demo, tạo device/token và lưu thông tin riêng. Không chạy lại INSTALL_TB trên database đang dùng. |
+| [dashboard.py](../server/thingsboard_local/dashboard.py) | Python gọi API tạo widget type/dashboard native và gắn device thật; không thêm số đo giả. Bình thường giữ layout có sẵn; --replace tạo lại layout. |
+| [dashboard_status.js](../server/thingsboard_local/dashboard_status.js), [.css](../server/thingsboard_local/dashboard_status.css) | Code widget được gửi lên ThingsBoard, chạy trong trình duyệt để trình bày ctx.data, hợp lệ/mất dữ liệu và counter; không tính lại mắt/ngáp từ ảnh. |
+| [Local-Docker.ps1](../tools/Local-Docker.ps1) | Helper chọn context desktop-linux, kiểm tra đĩa trên D, dùng chung lệnh compose. Không cài một Docker Engine riêng khác. |
+| [Setup-Local.ps1](../tools/Setup-Local.ps1) | Setup lần đầu: phụ thuộc thiếu, provision, images/database chưa tạo, tài khoản/device/dashboard. Có marker tránh initialize lại database. |
+| [Start-Local.ps1](../tools/Start-Local.ps1) | Bật Docker Desktop khi cần, compose up và gateway Python nền; kiểm tra cổng/PID để tránh mở nhầm bản thứ hai. |
+| [Stop-Local.ps1](../tools/Stop-Local.ps1) | Dừng gateway và nhóm container dự án; giữ volume/khóa, Docker Desktop và các dự án khác. |
+| [Restart-Gateway.ps1](../tools/Restart-Gateway.ps1) | Xác minh tiến trình sở hữu8885 rồi khởi động lại riêng gateway để nạp cấu hình. Bo phải reconnect; không dừng PostgreSQL/ThingsBoard. |
+| [Build-Flash.ps1](../tools/Build-Flash.ps1) | Kích hoạt Python IDF riêng, xóa PYTHONPATH ngoại lai, bật ccache, chọn build_guard/BSP/model, build/nạp. -Jobs chọn tác vụ song song, -Baud là tốc độ nạp, -BuildOnly không ghi bo. |
+| [Start-Viewer.ps1](../tools/Start-Viewer.ps1) | Tìm Python đã có cv2/numpy/serial/Tkinter để mở viewer tổng hợp; -Classic dùng OpenCV và không cần Tkinter. Không cài package vào IDF. -Detached mở nền, Q/Esc đóng viewer tổng hợp. |
+| [Clean-Downloads.ps1](../tools/Clean-Downloads.ps1) | Dọn gói tải và tùy chọn Clang/tệp chuyển đã thừa; -WhatIf xem trước. Không dùng làm lệnh xóa dữ liệu server/khóa/backup. |
+| [Test-Security.ps1](../tools/Test-Security.ps1) | Chạy 24 unit test và 12 kiểm tra tích hợp trên broker 8886/device thử. -Demo giải thích và chờ Enter để xem device thử; không cộng counter vào dashboard thật. |
+| [Test-LiveSecurity.ps1](../tools/Test-LiveSecurity.ps1) | Thêm danh tính demo tạm vào config, restart gateway 8885, chạy thử, thu hồi trong finally rồi restart; counter thật được giữ. Không mở COM hoặc nạp bo. |
+| [test_mqtt_guard.py](../tests/security/test_mqtt_guard.py) | Unit test HMAC/parser/freshness/session/replay/outbox/cách ly demo; dùng clock/DB thử, không chỉnh giờ PC. |
+| [run_mqtt_integration.py](../tests/security/run_mqtt_integration.py) | Client Python và gateway thử thật 8886, TLS/auth/ACL/gói sai, REST/latest/history của device thử; cuối lượt dọn process/device thử. |
+| [demo_live_gateway.py](../tests/security/demo_live_gateway.py) | Client Python gửi gói vào gateway đang dùng8885; đọc SQLite chỉ để đối chiếu và REST để xác nhận counter, mẫu thật và không chuyển số đo demo. |
+| [test_system_monitor.py](../tests/monitor/test_system_monitor.py) | 5 unit test: độ mới health, counter không cộng lặp, loại counter sai kiểu, lọc metadata log và giới hạn bộ đệm sự kiện. Không cần mở COM hay cửa sổ Tk. |
+
+Hai script test mô phỏng bên gửi của giao thức ESP32 bằng Python; không
+chứng minh đã tấn công/chiếm quyền bo. Live demo không ghi counter trực
+tiếp để tạo hiệu ứng; quyết định kiểm tra gói của gateway mới làm counter
+thay đổi. Kiểm tra lưu ThingsBoard là bước đối chiếu downstream, không phải
+pentest dashboard hoặc database. Xem [phạm vi demo](DEMO_BAO_MAT_VA_KIEM_THU.md).
+
+Chưa có client chạy từ máy ảo: script live còn kết nối localhost và đọc
+SQLite/REST local. Phần [máy ảo trong tài liệu demo](DEMO_BAO_MAT_VA_KIEM_THU.md#11-máy-ảo-cùng-lan-phương-án-mở-rộng-chưa-có-runner-từ-xa)
+là phương án mở rộng, không phải tính năng đã triển khai hay kết quả đã thử.
+
+Cấu hình cá nhân, khóa/token, chứng chỉ/CA riêng, database và báo cáo nằm
+trong `.private`. Không commit thư mục này. `.venv` của gateway và Python
+viewer có thể khác nhau; giữ chúng tách khỏi Python ESP-IDF.
 
 <a id="cau-hinh"></a>
 
@@ -904,7 +970,7 @@ extension `tools/bsp_ext.py` hoặc chưa chọn cấu hình theo README.
 ### 4.2. `main/CMakeLists.txt`
 
 Mở [CMakeLists của main](../examples/ov3660_face_detect/main/CMakeLists.txt).
-`idf_component_register()` liệt kê 8 file `.cpp` của ứng dụng và các
+`idf_component_register()` liệt kê 9 file `.cpp` của ứng dụng và các
 dependency như UART, GPIO, RMT, Wi-Fi, MQTT và `who_detect_app`.
 `idf_component_optional_requires()` nối component model được chọn với main.
 
@@ -927,9 +993,10 @@ mục thư viện đã tải trên máy cũ. ESP-IDF vẫn phải được cài 
 lấy dependency chưa có. Đổi phiên bản ở đây có thể đổi API hoặc hành vi
 driver; không xem nó như tên trang trí trong tài liệu.
 
-`main/certs/tb-cloud-root-ca.pem` và [README của CA](../examples/ov3660_face_detect/main/certs/README.md)
-là các file dữ liệu/phần giải thích bổ sung cho TLS. PEM được tải từ
-ThingsBoard và nhúng tại build, không phải ảnh train hoặc chứng chỉ client.
+`main/certs/ingest-root-ca.pem` và [README của CA](../examples/ov3660_face_detect/main/certs/README.md)
+là chứng chỉ công khai/phần giải thích TLS local. Provision sinh CA rồi
+chép bản công khai vào main để CMake nhúng khi guard bật. Clone mới phải
+tự provision; PEM này bị Git bỏ qua, không phải chứng chỉ định danh client.
 Khi thay CA, cần build và flash để phần trong bộ nhớ bo được thay theo.
 
 ### 4.4. `main/Kconfig.projbuild`
@@ -986,10 +1053,10 @@ trong `sdkconfig`; có cả hai file trên đĩa không có nghĩa cả hai cùn
 | --- | --- | --- |
 | `examples/ov3660_face_detect/sdkconfig` | menuconfig/CMake lưu lựa chọn thực tế, có thể gồm mật khẩu/token | Dùng menuconfig; giữ cục bộ theo `.gitignore`. |
 | `sdkconfig.old` | Bản cấu hình trước đó do công cụ lưu | Không dùng làm nơi chỉnh cấu hình chính. |
-| `build/config/sdkconfig.h` | Build sinh các macro `CONFIG_...` cho C/C++ | Không sửa: lần cấu hình sau có thể ghi đè. |
-| `build/config/sdkconfig.json` | Bản biểu diễn JSON của cấu hình cho công cụ | Không phải cấu hình Wi-Fi trực tiếp của firmware đang chạy. |
-| `build/CMakeCache.txt` | Nhớ biến BSP, model, đường dẫn và lựa chọn CMake | Để công cụ quản lý, không chép sang máy khác. |
-| `build/*.elf`, `build/*.bin`, bootloader/bảng phân vùng | Kết quả biên dịch để debug/nạp flash | Có thể chứa cấu hình riêng đã biên dịch; không nằm trong bản nguồn chia sẻ. |
+| `build_guard/config/sdkconfig.h` | Build sinh các macro `CONFIG_...` cho C/C++ | Không sửa: lần cấu hình sau có thể ghi đè. |
+| `build_guard/config/sdkconfig.json` | Bản biểu diễn JSON của cấu hình cho công cụ | Không phải cấu hình Wi-Fi trực tiếp của firmware đang chạy. |
+| `build_guard/CMakeCache.txt` | Nhớ biến BSP, model, đường dẫn và lựa chọn CMake | Để công cụ quản lý, không chép sang máy khác. |
+| `build_guard/*.elf`, `build_guard/*.bin`, bootloader/bảng phân vùng | Kết quả biên dịch để debug/nạp flash | Có thể chứa cấu hình riêng đã biên dịch; không nằm trong bản nguồn chia sẻ. |
 | `managed_components/` | Component Manager tải thư viện/model theo manifest | Không sửa để làm thay đổi bền vững của repo; có thể bị tải lại. |
 | `dependencies.lock*` | Công cụ ghi phiên bản dependency đã giải quyết | Bản chia sẻ hiện bỏ qua; manifest giữ các phiên bản chính. |
 
@@ -1031,7 +1098,9 @@ build khi đồ thị component cần chúng; lúc chạy, chỉ đối tượng
 
 Với 6 buffer camera và một ring buffer hữu hạn ở cấu hình OV3660: camera tiếp tục tạo
 ảnh, node lấy ảnh mới và thay ảnh cũ theo quy tắc. Task nhận diện đợi báo
-`NEW_FRAME`, rồi đọc frame từ node. Nếu model/callback chậm hơn camera,
+`NEW_FRAME`, rồi chép frame từ node dưới mutex sang snapshot riêng trước
+khi chạy bộ lọc/model. Cùng mutex bảo vệ lúc trả/tái sử dụng buffer camera.
+Bản chép tránh model và callback đọc buffer đã được tái sử dụng. Nếu model/callback chậm hơn camera,
 hệ thống không cam kết xử lý mọi ảnh mà cảm biến đã chụp. Vì vậy “camera
 cấu hình 24 FPS” và “viewer nhận 8 FPS” có thể cùng đúng ở các khâu khác nhau.
 
@@ -1043,7 +1112,7 @@ do quản lý thời gian dùng buffer và bản chép trước nén JPEG có ý
 
 | File | Công việc bên trong và quan hệ với main |
 | --- | --- |
-| [`components/who_detect/who_detect.hpp`](../components/who_detect/who_detect.hpp), [`who_detect.cpp`](../components/who_detect/who_detect.cpp) | Định nghĩa task `WhoDetect` và kiểu `result_t`. Constructor đăng ký nhận báo ảnh mới. Trong `task()`, đợi sự kiện, lấy frame, đổi sang `img_t`, gọi `m_model->run(img)`, rồi gọi callback với danh sách kết quả, timestamp và ảnh. |
+| [`components/who_detect/who_detect.hpp`](../components/who_detect/who_detect.hpp), [`who_detect.cpp`](../components/who_detect/who_detect.cpp) | Định nghĩa task `WhoDetect` và kiểu `result_t`. Constructor đăng ký nhận báo ảnh mới. Trong `task()`, đợi sự kiện, chép snapshot khi bật, đổi sang `img_t`, lọc ảnh nguồn, chạy model rồi callback. Frame bị loại chỉ tạo quan sát không hợp lệ, không chạy model mặt. |
 | [`components/who_app/who_detect_app/who_detect_app_base.hpp`](../components/who_app/who_detect_app/who_detect_app_base.hpp), [`who_detect_app_base.cpp`](../components/who_app/who_detect_app/who_detect_app_base.cpp) | Tạo `WhoDetect` gắn với node ảnh cuối, đăng ký pipeline/task vào nhóm ứng dụng; chuyển các lệnh `set_model()` và `set_fps()` đến bộ nhận diện. |
 | [`components/who_app/who_detect_app/who_detect_app_term.hpp`](../components/who_app/who_detect_app/who_detect_app_term.hpp), [`who_detect_app_term.cpp`](../components/who_app/who_detect_app/who_detect_app_term.cpp) | Bản ứng dụng terminal gốc đăng ký callback in kết quả và chạy task. `WhoDetectAppSerial` trong `app_main.cpp` kế thừa lớp này, thay callback và tăng stack nhận diện. Vì thế callback in chữ của bản gốc không phải đường xuất chính hiện tại. |
 | [`components/who_app/who_detect_app/who_detect_app_lcd.hpp`](../components/who_app/who_detect_app/who_detect_app_lcd.hpp), [`who_detect_app_lcd.cpp`](../components/who_app/who_detect_app/who_detect_app_lcd.cpp) | Ghép nhận diện với hiển thị lên LCD của bo. Giữ để hỗ trợ nhánh LCD trong ví dụ; cấu hình OV3660/S3 hiện khởi tạo bản Serial. |
@@ -1151,7 +1220,7 @@ Danh sách để tra cứu các file cấu hình thư viện đang có:
 | --- | --- |
 | [`tools/bsp_ext.py`](../tools/bsp_ext.py) | ESP-IDF nạp qua `IDF_EXTRA_ACTIONS_PATH`, thêm callback vào `idf.py`. Nó đọc target/defaults/model từ tham số, cache hoặc môi trường; kiểm tra BSP khớp target; thêm biến BSP/model cho CMake; chỉnh manifest để chọn dependency BSP/model và giữ ràng buộc phiên bản đã có. Không chạy `python bsp_ext.py` để bật camera. |
 | [`tools/gen_dependencies_lock.py`](../tools/gen_dependencies_lock.py) | Công cụ bảo trì thử cấu hình các ví dụ/BSP để sinh lockfile. Mã có xóa build/lock và làm trống manifest trước các lượt; không phải lệnh cần chạy để người mới cài hay train. |
-| [`tools/ci/build_apps.py`](../tools/ci/build_apps.py) | Công cụ CI dùng `idf_build_apps` và biến môi trường để tìm/build các app trên máy kiểm tra tự động. Luồng người dùng hiện dùng `idf.py build` theo README. |
+| [`tools/ci/build_apps.py`](../tools/ci/build_apps.py) | Công cụ CI dùng `idf_build_apps` và biến môi trường để tìm/build các app tự động. Người dùng build ứng dụng bằng Build-Flash.ps1 theo README. |
 | [`tools/ci/check_readme_links.py`](../tools/ci/check_readme_links.py) | Công cụ kiểm tra đường dẫn Markdown và URL web. Chạy nó là kiểm tra tài liệu, không thử camera hoặc thuật toán nhận diện. |
 
 <a id="theo-dau"></a>
@@ -1216,22 +1285,25 @@ mọi đối tượng RAM, nên tổng đếm của lần chạy cũ cũng mất
 
 ```mermaid
 sequenceDiagram
-    participant Cam as Task camera/detect
-    participant Stream as serial_jpeg_stream.cpp
-    participant Queue as Queue trạng thái mới nhất
-    participant MQTT as Task MQTT
-    participant Broker as Broker ThingsBoard
-    participant LED as Task LED GPIO48
-    Cam->>Stream: result ảnh và mặt
-    Stream->>Stream: phân tích hành vi, cập nhật cảnh báo
-    Stream->>Queue: ghi đè DriverBehavior mới nhất
-    Note over MQTT: đến chu kỳ gửi mặc định 5 giây
-    MQTT->>Queue: lấy mẫu mới nhất
-    MQTT->>MQTT: tăng sequence, tạo JSON
-    MQTT->>Broker: publish QoS 1 nếu connected
-    Broker-->>MQTT: PUBACK
-    MQTT->>LED: MQTT_EVENT_PUBLISHED → notification
-    LED->>LED: xanh 150 ms rồi tắt
+    participant Cam as Camera/detect
+    participant Stream as Phân tích hành vi
+    participant MQTT as MQTT trên ESP32
+    participant Guard as Gateway Windows:8885
+    participant TB as ThingsBoard trong Docker
+    participant LED as LED GPIO48
+    Cam->>Stream: snapshot hợp lệ và kết quả mặt
+    Stream->>MQTT: ghi đè queue mẫu mới nhất
+    Note over MQTT,Guard: Đã có TLS, subscribe và session HMAC hợp lệ
+    MQTT->>Guard: sample đã ký, QoS1
+    Guard-->>MQTT: PUBACK đầu vào (mqtt_acked)
+    Guard->>Guard: kiểm tra HMAC/phiên/sequence/độ mới
+    Guard->>Guard: ghi outbox và sequence nguyên tử
+    Guard->>TB: telemetry timestamp gốc, QoS1
+    TB-->>Guard: PUBACK upstream
+    Guard-->>MQTT: ACK ứng dụng có HMAC
+    MQTT->>MQTT: kiểm tra ACK, cập nhật guard_forwarded
+    MQTT->>LED: xanh khoảng 150 ms rồi tắt
+    Note over TB: REST/UI được đối chiếu riêng để xác nhận dữ liệu đã lưu
 ```
 
 Đường UART gửi ảnh tới viewer diễn ra ngoài sơ đồ mạng này. Vì thế có thể
@@ -1245,10 +1317,10 @@ không buộc widget và ảnh viewer cập nhật đúng cùng một thời đi
 | --- | --- | --- |
 | `. ...\export.ps1` | Đưa Python/toolchain và công cụ IDF vào môi trường cửa sổ PowerShell hiện tại | Để cửa sổ đó tìm được `idf.py` và compiler đúng bản. |
 | Đặt `IDF_EXTRA_ACTIONS_PATH` tới `tools/` | Cho `idf.py` nạp `bsp_ext.py` | Để cách chọn BSP/model của repo được áp dụng. |
-| `idf.py ... set-target esp32s3` theo README | Chọn target, cấu hình lại dự án, có thể fullclean/tạo lại cấu hình | Dùng khi thiết lập lần đầu/đổi target; không cần lặp mỗi lần xem stream. |
-| `idf.py menuconfig` | Sửa lựa chọn lưu trên PC trong `sdkconfig` | Chuẩn bị giá trị sẽ được build vào firmware; bo chưa nhận giá trị mới chỉ vì bạn vừa Save. |
-| `idf.py build` | Tải dependency cần thiết, cấu hình, compile và link thành binary | Biến code/config/model header thành chương trình có thể nạp. |
-| `idf.py -p COM4 flash` | Ghi binary, bootloader/bảng phân vùng liên quan lên flash của bo | Đưa bản mới vào bo; cần đóng chương trình đang chiếm COM. |
+| `idf.py ... set-target esp32s3` (không dùng để đổi Wi-Fi) | Chọn target, cấu hình lại dự án, có thể fullclean/tạo lại cấu hình | Dùng khi thiết lập lần đầu/đổi target; không cần lặp mỗi lần xem stream. |
+| `idf.py -B build_guard menuconfig` | Sửa lựa chọn lưu trên PC trong `sdkconfig` | Chuẩn bị giá trị sẽ được build vào firmware; bo chưa nhận giá trị mới chỉ vì bạn vừa Save. |
+| `tools/Build-Flash.ps1 -BuildOnly` | Tải dependency cần thiết, cấu hình, compile và link thành binary | Biến code/config/model header thành chương trình có thể nạp. |
+| `tools/Build-Flash.ps1 -Port COM4` | Ghi binary, bootloader/bảng phân vùng liên quan lên flash của bo | Đưa bản mới vào bo; cần đóng chương trình đang chiếm COM. |
 | Nhấn RST | Khởi động lại firmware đã có trong flash | Không tự lấy code mới từ PC; các trạng thái RAM trở về ban đầu. |
 | Chạy viewer | Mở COM và hiển thị JPEG/trạng thái | Quan sát trực quan firmware đang chạy. |
 | Chạy recorder/diagnostics | Nhận rồi lưu dữ liệu trên đĩa PC | Tạo dữ liệu để xem lại/train/điều tra, không tự sửa firmware. |
@@ -1265,13 +1337,13 @@ không buộc widget và ảnh viewer cập nhật đúng cùng một thời đi
 | Xem được mặt nhưng mắt UNKNOWN | `driver_behavior.cpp`: kích thước mặt, điểm mốc, pose, holdover, độ sáng da; nhìn cờ valid trước count. |
 | Mắt nhắm lâu mà blink không tăng | Xem quy tắc blink 80 ms–1.2 giây trong `driver_behavior.cpp`; nhắm lâu là luật cảnh báo riêng ở `driver_alert.cpp`. |
 | Miệng mở nhưng ngáp không tăng | Điểm model → đủ hai khung mở → đủ 0.8 giây → đã đóng một giây để gỡ cờ chưa; tất cả nằm ở `driver_behavior.cpp`. |
-| Đổi ngưỡng thời gian báo nhắm | `menuconfig` từ `Kconfig.projbuild`, rồi build/flash; không sửa `build/config/sdkconfig.h`. |
+| Đổi ngưỡng thời gian báo nhắm | `menuconfig` từ `Kconfig.projbuild`, rồi build/flash; không sửa `build_guard/config/sdkconfig.h`. |
 | Đổi số lần ngáp/cửa sổ đếm | Các mục menu và `driver_alert.cpp`; PERCLOS dùng cửa sổ riêng trong `driver_behavior.cpp`. |
 | Đổi nhịp hoặc thời lượng báo 10/15 giây | `driver_alert.cpp`: `active_pattern()`, `burst_pulse()`, các hằng duration và `buzzer_task()`. |
-| Wi-Fi connected nhưng không có telemetry | `driver_telemetry.cpp`: cờ `time_synced`/SNTP trước, sau đó URI `mqtts://...:8883`, CA, hostname, token và MQTT state/ACK. Wi-Fi có IP chỉ xác nhận một giai đoạn mạng. |
-| Có sequence tăng nhưng ảnh/status không mới | So `uptime_ms` của mẫu và luồng camera; publish task có thể tái sử dụng mẫu cuối khi không có mẫu mới. |
-| Muốn đổi nội dung tiếng Việt của lý do báo | `format_alert_reasons()` trong `driver_telemetry.cpp`; viewer dùng `alarm_label()` riêng. |
-| LED không xanh dù ảnh vẫn chạy | Xem MQTT ACK trước, sau đó RMT/GPIO48 trong `driver_status_led.cpp`; LED không theo mọi frame camera. |
+| Wi-Fi connected nhưng không có telemetry | `driver_telemetry.cpp`: cờ `time_synced`/NTP UDP 123 và cùng LAN trước; sau đó URI `mqtts://IP_PC:8885`, CA/IP, MQTT, grant HMAC và token upstream chỉ ở gateway. Wi-Fi có IP chỉ xác nhận một giai đoạn mạng. |
+| Có sequence tăng nhưng ảnh/status không mới | So `uptime_ms` của mẫu và luồng camera; publish task có thể tái sử dụng mẫu cuối nhưng guard sẽ chặn nếu tuổi trên 15 giây. |
+| Muốn đổi nội dung tiếng Việt của lý do báo | `format_alert_reasons()` trong `driver_telemetry.cpp`; classic/export dùng `alarm_label()` riêng, viewer tổng hợp hiện mask và nhịp buzzer ở fields(). |
+| LED không xanh dù ảnh vẫn chạy | Xem ACK ứng dụng `guard_forwarded_*` trước, sau đó RMT/GPIO48 trong `driver_status_led.cpp`; LED không theo mọi frame camera. |
 | FPS giảm | Task detect/callback ở `app_main.cpp`, `who_detect.cpp`, thời gian phân tích/nén/UART trong `serial_jpeg_stream.cpp`, kích thước JPEG và gói lỗi trên viewer. |
 | Muốn cải thiện cho người/phòng khác | `record_training_video.py` → nhãn thật → `train_driver_model.py` → model ứng viên → kiểm tra và flash. Chỉ chỉnh bảng chữ `draw()` không đổi nhận diện. |
 

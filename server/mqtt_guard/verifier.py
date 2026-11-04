@@ -156,9 +156,14 @@ class Verifier:
                          "auth_device_id": device, "auth_key_id": body["key_id"],
                          "auth_session_id": sid, "auth_sequence": sequence,
                          "last_verified_at": now, "sample_age_ms": age}
-            cursor = self.db.execute("INSERT INTO outbox(device,sid,sequence,digest,sent_at,measured_at,telemetry) "
-                                     "VALUES(?,?,?,?,?,?,?)", (device, sid, sequence, digest, sent_at,
-                                                               sent_at - age, json.dumps(telemetry, ensure_ascii=False)))
+            # An administrator may provision a demo identity on the real broker.
+            # Its valid samples exercise replay protection but never enter the
+            # production forwarding queue. This policy comes from server config,
+            # never from the received payload, and is stored in the same transaction.
+            status = "demo" if self.devices[device].get("demo_only") is True else "pending"
+            cursor = self.db.execute("INSERT INTO outbox(device,sid,sequence,digest,sent_at,measured_at,telemetry,status) "
+                                     "VALUES(?,?,?,?,?,?,?,?)", (device, sid, sequence, digest, sent_at,
+                                                               sent_at - age, json.dumps(telemetry, ensure_ascii=False), status))
             self.db.execute("UPDATE sessions SET last_seq=? WHERE device=?", (sequence, device))
         return {"status": "ACCEPTED", "outbox_id": cursor.lastrowid}
 

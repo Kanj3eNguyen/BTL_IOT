@@ -24,8 +24,10 @@ flowchart LR
     F --> E[Mô hình mắt và miệng<br/>chạy trên ESP32-S3]
     E --> A[Bộ đếm, PERCLOS<br/>và cảnh báo]
     A --> B[Buzzer GPIO14]
-    A --> M[Wi-Fi 2,4 GHz → MQTT<br/>ThingsBoard: số liệu]
-    M --> L[LED GPIO48<br/>nháy khi có ACK]
+    A --> M[Wi-Fi / MQTTS + HMAC<br/>Gateway Python trên laptop:8885]
+    M --> T[ThingsBoard + PostgreSQL<br/>Docker Desktop trên cùng laptop]
+    T --> D[Dashboard localhost:8080]
+    T -. PUBACK rồi gateway ký ACK .-> L[Bo xác minh ACK<br/>LED GPIO48 nháy xanh]
     F --> U[USB serial: JPEG + trạng thái]
     A --> U
     U --> V[Viewer Python trên PC<br/>hiển thị ảnh và số liệu]
@@ -33,8 +35,14 @@ flowchart LR
 
 **Nhận diện và quyết định cảnh báo diễn ra trên bo.** Viewer Python nhận kết
 quả đã tính để hiển thị và có thể ghi video. ThingsBoard nhận số liệu JSON;
-firmware này không gửi ảnh lên MQTT. Khi rút PC và dùng nguồn USB khác, bo
-vẫn tính và gửi số liệu nếu mạng Wi-Fi đã cấu hình còn hoạt động.
+firmware này không gửi ảnh lên MQTT. Khi dùng nguồn USB riêng, bo vẫn tính
+và báo tại chỗ. Gửi dữ liệu vào ThingsBoard local còn cần laptop, gateway,
+container và đường LAN hoạt động; chỉ có Wi-Fi chưa đủ.
+
+Gateway là chương trình `server.mqtt_guard.gateway` chạy nền bằng Python
+trên Windows, **ngoài Docker**. ThingsBoard và PostgreSQL là hai container
+trong nhóm `driver-monitor-local`. `VmmemWSL` bao gồm môi trường Linux của
+Docker Desktop; không phải một bộ nhận diện mắt/miệng khác.
 
 > “Nhận diện mặt” ở đây có nghĩa là tìm vị trí một khuôn mặt trong ảnh.
 > Hệ thống chưa xác minh danh tính người lái.
@@ -49,8 +57,8 @@ vẫn tính và gửi số liệu nếu mạng Wi-Fi đã cấu hình còn hoạ
 | PSRAM 8 MB | Có thêm bộ nhớ cho khung hình và xử lý ảnh. |
 | USB serial | Đưa luồng JPEG và trạng thái đến PC, đồng thời là đường để nạp firmware. Bo này có thể dùng chip USB–UART CH343; Windows gán tên COM riêng như COM4 hoặc COM7. |
 | Buzzer ở GPIO14 | Phát nhịp cảnh báo. Firmware hiện dành cho module buzzer chủ động, kích hoạt mức LOW. |
-| LED RGB ở GPIO48 | Nháy xanh khoảng 150 ms sau khi broker xác nhận một bản tin MQTT QoS 1. |
-| Wi-Fi 2,4 GHz | Đưa telemetry từ bo lên ThingsBoard. Viewer qua COM vẫn dùng được nếu không có Wi-Fi. |
+| LED RGB ở GPIO48 | Nháy xanh khoảng 150 ms sau ACK ứng dụng có HMAC từ gateway; ACK này được tạo sau PUBACK của ThingsBoard. |
+| Wi-Fi 2,4 GHz | Đưa telemetry đã ký từ bo tới gateway; viewer COM vẫn dùng được khi Wi-Fi/MQTT lỗi. |
 
 Nếu bo cùng tên N16R8 nhưng **chân camera khác ESP32-S3-EYE**, cần chỉnh
 cấu hình chân trước khi nạp. GPIO4 đang là đường SDA của camera, nên buzzer
@@ -65,7 +73,10 @@ không được nối vào GPIO4.
    khởi động OV3660, đặt xung 20 MHz, lấy ảnh RGB565. Ảnh được lật trước
    khi đi vào các bước tiếp theo, vì vậy viewer và phần nhận diện nhìn cùng
    một hướng ảnh.
-3. ESP-WHO xử lý ảnh để trả về khung mặt và **5 điểm mốc**: hai mắt, mũi,
+3. Task detect chép ảnh dưới mutex sang snapshot riêng, kiểm tra heuristic
+   lỗi pha byte RGB565 rồi mới đưa ảnh hợp lệ vào model. Bộ lọc này giúp
+   loại một kiểu lỗi ảnh nguồn; không phải cơ chế xác thực/chống giả mạo.
+   ESP-WHO xử lý ảnh để trả về khung mặt và **5 điểm mốc**: hai mắt, mũi,
    hai khóe miệng. Mỗi ảnh mới gọi lại phần phân tích trong
    [`driver_behavior.cpp`](../examples/ov3660_face_detect/main/driver_behavior.cpp).
 4. [`serial_jpeg_stream.cpp`](../examples/ov3660_face_detect/main/serial_jpeg_stream.cpp)
@@ -88,7 +99,8 @@ bo có thể vẫn vẽ được mặt nhưng chưa đủ chi tiết để đo �
 Khi há miệng rộng làm bộ tìm mặt bỏ sót ngắn hạn, firmware có thể giữ tọa độ
 mặt gần nhất tối đa **1,2 giây** (`face_holdover=true`). Trong lúc giữ tọa
 độ, firmware **không kết luận mắt mở hay nhắm** từ điểm mốc cũ. Viewer hiện
-`Face: HELD 1.2s` để phân biệt với một mặt vừa tìm được.
+`Face: HELD 1.2s` trong bản classic/export để phân biệt với một mặt vừa tìm
+được. Viewer tổng hợp hiện vùng Khuôn mặt/mắt; cờ chi tiết vẫn có trong JSON.
 
 ### 4.2. Mô hình mắt và miệng
 
@@ -114,7 +126,8 @@ liên tiếp trước khi đổi từ mở sang nhắm hoặc từ đóng sang m
 
 Ngoài góc đầu, ảnh quá tối, không thấy đủ điểm mốc hoặc thiếu mặt cũng có
 thể làm `eyes_valid=false` hay `mouth_valid=false`. **“Không hợp lệ” không có
-nghĩa là “mở” hoặc “đóng”.** Viewer hiện `Eyes: UNKNOWN`; telemetry MQTT gửi
+nghĩa là “mở” hoặc “đóng”.** Viewer tổng hợp hiện KHÔNG RÕ (classic hiện
+`Eyes: UNKNOWN`); telemetry MQTT gửi
 `eyes_closed: null` và `eye_closed_probability: null` khi mắt không hợp lệ.
 Nếu camera cứ hướng lên trần, `driver_present=false` và không có số đo mắt.
 
@@ -196,9 +209,10 @@ lâu, **4** = ngáp nhiều, **8** = PERCLOS cao, **16** = không thấy mặt. 
 `12 = 4 + 8` là ngáp nhiều và PERCLOS cao cùng lúc. Trên ThingsBoard,
 `alert_reasons` là dòng chữ tiếng Việt để người quản trị đọc dễ hơn.
 
-LED GPIO48 có mục đích khác buzzer: nó chỉ nháy xanh khi ThingsBoard gửi
-xác nhận **MQTT QoS 1** cho một bản tin đã nhận. LED không chứng minh nội
-dung nhận diện đúng; nó giúp nhìn thấy đường gửi dữ liệu đang hoạt động.
+LED GPIO48 có mục đích khác buzzer: bo chỉ nháy khi xác minh được ACK ứng
+dụng của gateway, sau khi ThingsBoard PUBACK. `mqtt_acked` của broker đầu
+vào chưa đủ để bật LED ở chế độ guard. ACK/PUBACK chưa khẳng định database
+đã commit hay model nhận đúng; cần REST/UI và timestamp mới để đối chiếu lưu.
 
 ## 8. Hai đường truyền dữ liệu: COM và MQTT
 
@@ -211,48 +225,51 @@ cùng một JSON trạng thái qua **UART 1500000 baud**. Gói có dấu bắt �
 loại gói, độ dài và mã kiểm tra. [`driver_monitor_viewer.py`](../examples/ov3660_face_detect/driver_monitor_viewer.py)
 trên PC tìm gói, kiểm tra dữ liệu, giải mã JPEG và vẽ bảng kết quả. Nếu
 gói hỏng, viewer bỏ gói và tìm gói tiếp theo; `Bad UART` giúp bạn thấy số
-gói hỏng. Chỉ **một chương trình** có thể mở cùng cổng COM tại một thời điểm.
+gói hỏng trong classic; viewer tổng hợp ghi UART lỗi. Chỉ **một chương trình**
+có thể mở cùng cổng COM tại một thời điểm.
 
-`Face`, `Eyes`, `Mouth`, `PERCLOS`, `Blinks`, `Yawns`, `WiFi`, `MQTT`, `ACK`
-trên viewer đều lấy từ trạng thái bo gửi. PC không tính lại blink/ngáp từ
+`Face`, `Eyes`, `Mouth`, `PERCLOS`, `Blinks`, `Yawns`, `WiFi`, `Time`, `Guard`, `TB seq`
+là nhãn trong classic; viewer tổng hợp dùng các mục tiếng Việt tương ứng ở
+vùng ESP32. Các giá trị đó đều lấy từ trạng thái bo gửi. PC không tính lại blink/ngáp từ
 ảnh. Khi nhấn RST, bo khởi động lại; viewer có thể hiện chờ vài giây rồi
 nhận luồng mới. Nếu COM bị chiếm, đóng viewer trước khi nạp firmware.
 
-### MQTT: số liệu cho ThingsBoard
+Viewer tổng hợp còn đọc metadata health/audit của gateway trên laptop và
+REST của ThingsBoard, cạnh vùng camera/ESP32. Đây là ba nguồn độc lập:
+serial nhận được không chứng minh Wi-Fi/MQTT nối; gateway sống không chứng
+minh bo gửi; API trả mẫu cũ không chứng minh đang có telemetry mới. Giao
+diện phân biệt và đánh dấu dữ liệu cũ. Tab sự kiện ESP32 được suy ra từ JSON,
+không phải thu toàn bộ console ESP-IDF thô trên UART nhị phân.
 
-Nếu `menuconfig` có SSID, mật khẩu, URI và token, bo kết nối Wi-Fi rồi
-gửi JSON đến topic `v1/devices/me/telemetry` theo chu kỳ mặc định **5 giây**.
-Token device được dùng làm tên đăng nhập MQTT. Ở chế độ Cloud, URI mặc định là
-`mqtts://mqtt.thingsboard.cloud:8883`: TLS mã hóa kết nối và xác minh máy
-chủ bằng [CA nhúng trong firmware](../examples/ov3660_face_detect/main/certs/README.md).
-Bo đồng bộ giờ SNTP sau khi Wi-Fi có IP rồi mới bắt đầu kết nối TLS, để
-kiểm tra cả thời hạn chứng chỉ. Việc chờ nằm trong task mạng, nên nhận diện
-và stream COM vẫn tiếp tục. Viewer hiện `Time: WAIT`/`Time: OK` và trạng thái
-`MQTTS`; không thấy MQTTS connected ngay khi Wi-Fi vừa kết nối là có thể
-đang chờ đồng bộ giờ. Firmware từ chối URI MQTT thường.
+### MQTT: số liệu qua gateway tới ThingsBoard local
 
-Mỗi chu kỳ có một `sequence` mới, kể cả lúc MQTT offline. `boot_id` đổi
-khi bo khởi động lại. Người quản trị dùng hai trường này để phân biệt lần
-chạy mới với các khoảng gửi bị thiếu. `mqtt_acked` trên viewer tăng khi
-broker xác nhận bản tin QoS 1; LED nháy cùng sự kiện này. Trên ThingsBoard,
-`eyes_closed`, `mouth_open`, `perclos` có thể là `null` khi dữ liệu tương
-ứng chưa hợp lệ. `null` là “không đo được”, còn `false`/`0` là giá trị đã đo.
+Bo dùng SSID/password đã cấu hình, nhận IP rồi lấy giờ từ NTP trên laptop
+(UDP 123). Sau lần đồng bộ đầu tiên, bo mở TLS tới `mqtts://IP_PC:8885`, kiểm
+tra CA, IP/hostname và thời hạn chứng chỉ. Mật khẩu MQTT và HMAC key là hai
+lớp khác nhau. Client ID/topic ACL giới hạn đường gửi và nhận của mỗi bo.
 
-Khi bật `CONFIG_DRIVER_MQTT_GUARD_ENABLED`, đường truyền đổi thành:
+Bo subscribe `dm/v1/<device_id>/down`, gửi hello có HMAC và nhận session có
+hạn từ gateway. Mẫu mỗi khoảng 5 giây được bọc cùng boot nonce, session ID,
+sequence, timestamp và tuổi mẫu rồi ký. Gateway kiểm tra trước khi ghi outbox
+SQLite và chuyển mẫu hợp lệ sang ThingsBoard qua `127.0.0.1:18884`.
+Token đích chỉ nằm ở gateway; bo không dùng token ThingsBoard để gửi thẳng.
 
-```text
-ESP32-S3 --MQTTS/HMAC--> gateway PC:8885
-gateway --MQTT local--> ThingsBoard:18884
-```
+`sequence` tăng ở mỗi chu kỳ đã có mẫu, kể cả lúc offline; khoảng nhảy không
+tự là tấn công. Mẫu quá cũ bị loại, không có nhật ký lưu mọi phép đo offline
+trên flash. `mqtt_acked` đếm PUBACK của gateway đầu vào. Chỉ sau PUBACK của
+ThingsBoard, gateway mới ký ACK để bo tăng `guard_forwarded_sequence`/
+`guard_forwarded_count` và nháy LED. Kiểm thử REST đọc lại database riêng,
+vì MQTT PUBACK không tương đương commit lưu trữ.
 
-Firmware khi đó không dùng access token ThingsBoard để gửi thẳng. Nó ký
-hello và telemetry bằng khóa riêng, nhận session có hạn từ gateway, rồi chỉ
-đánh dấu `guard_ready` sau khi grant hợp lệ. `guard_forwarded_sequence` và
-`guard_forwarded_count` chỉ tăng khi gateway ký ACK sau khi ThingsBoard đã
-PUBACK; `mqtt_acked` chỉ phản ánh broker đầu vào. Cấu hình, CA local và
-token đích được giữ ngoài repo trong `.private`. Xem
-[hướng dẫn chạy local](CHAY_LOCAL_A_Z.md) và
-[kế hoạch xác thực/chống phát lại](KE_HOACH_CHONG_GIA_MAO.md).
+Trong dữ liệu hành vi, `boot_id` là số 32 bit để đọc lần chạy; boot nonce
+128 bit của phong bì xác thực là trường riêng. Chống replay trên gateway
+còn dựa vào `auth_device_id`, `auth_session_id`, `auth_sequence` và SQLite.
+Không dùng riêng cặp boot_id số/sequence để thay cơ chế xác thực này.
+
+Giờ lấy từ PC chưa có xác thực NTP riêng. Chờ mạng/giờ/TLS không chặn camera
+và buzzer. Khi `eyes_valid`, `mouth_valid` hoặc `perclos_valid` không đạt,
+trường trạng thái/số đo tương ứng trên MQTT là `null`, không giả thành mở/0.
+Xem [cơ chế chi tiết](KE_HOACH_CHONG_GIA_MAO.md) và [local A–Z](CHAY_LOCAL_A_Z.md).
 
 ### Đọc các trường thường gặp
 
@@ -268,7 +285,8 @@ token đích được giữ ngoài repo trong `.private`. Xem
 | `auto_light`, `ae_level`, `lighting_state` | Camera có nhận control bù sáng hay không, mức mục tiêu AE và trạng thái sáng (`ADJUST`, `OK`, `DARK`, `BRIGHT`; serial dùng mã 0..4). |
 | `perclos`, `perclos_observed_s`, `perclos_window_ready` | Tỷ lệ nhắm mắt, số giây mắt hợp lệ đã quan sát, và cờ cho biết đã đủ dữ liệu để xét cảnh báo. |
 | `alert_reasons`, `alert_reasons_mask`, `buzzer_pattern` | Lý do cảnh báo dạng chữ, dạng bit để máy xử lý, và kiểu nhịp buzzer đang được chọn. |
-| `boot_id`, `sequence` | Mã lần khởi động và số thứ tự chu kỳ gửi. Dùng chung để nhận ra bo vừa reset hoặc bị thiếu bản tin. |
+| `boot_id`, `sequence` | Mã lần khởi động dạng số trong dữ liệu và số thứ tự chu kỳ gửi; khác boot nonce/session dùng xác thực. |
+| `auth_device_id`, `auth_session_id`, `auth_sequence` | Gateway tạo sau xác minh; dùng nhận ra nguồn/phiên/thứ tự đã được chấp nhận. |
 
 ## 9. Huấn luyện model rồi đưa lên bo
 
@@ -292,8 +310,8 @@ trên PC, in số mẫu cùng ma trận lỗi `[[TN, FP], [FN, TP]]`, rồi vi�
 `driver_ml_weights.candidate.hpp`.
 
 File `candidate.hpp` **chưa chạy trên bo**. Sau khi xem kết quả, bạn sao
-lưu `driver_ml_weights.hpp`, chép ứng viên vào tên đó, chạy `idf.py build`
-và `idf.py -p COM4 flash`. Lúc ấy trọng số mới mới nằm trong firmware trên
+lưu `driver_ml_weights.hpp`, chép ứng viên vào tên đó, về gốc repo và chạy
+`tools/Build-Flash.ps1 -Port COM4`. Lúc ấy trọng số mới mới nằm trong firmware trên
 ESP32-S3. Xem [mục 8 của README gốc](../README.md)
 để có từng lệnh PowerShell và cách quay lại model cũ.
 
@@ -325,6 +343,7 @@ Sau đó xem [các ví dụ theo dấu lời gọi hàm](GIAI_THICH_TUNG_FILE.md
 | Ký HMAC, session và ACK của local guard | [`driver_message_auth.cpp`](../examples/ov3660_face_detect/main/driver_message_auth.cpp), [`server/mqtt_guard/verifier.py`](../server/mqtt_guard/verifier.py) |
 | LED GPIO48 | [`driver_status_led.cpp`](../examples/ov3660_face_detect/main/driver_status_led.cpp) |
 | Cửa sổ stream trên PC | [`driver_monitor_viewer.py`](../examples/ov3660_face_detect/driver_monitor_viewer.py) |
+| Bảng ESP32/gateway/ThingsBoard trong cùng cửa sổ | [`driver_system_monitor.py`](../examples/ov3660_face_detect/driver_system_monitor.py) |
 | Ghi video và huấn luyện | [`record_training_video.py`](../examples/ov3660_face_detect/record_training_video.py), [`train_driver_model.py`](../examples/ov3660_face_detect/train_driver_model.py) |
 
 ## 11. Ví dụ một lượt hoạt động
@@ -338,5 +357,45 @@ blink; sau 1,5 giây buzzer báo nhắm mắt lâu. Khi mắt mở, báo này d�
 Bo vẫn tiếp tục ghi thời gian mắt hợp lệ. Sau ít nhất một phút và đủ 30
 giây quan sát, PERCLOS được phép gây cảnh báo nếu tỷ lệ nhắm đạt 15%.
 Khoảng 5 giây một lần, bo gửi **số liệu hiện tại** lên ThingsBoard, nhận
-ACK thì LED nháy xanh. Viewer trên PC vẫn nhận ảnh và trạng thái qua COM
+ACK ứng dụng có HMAC sau PUBACK ThingsBoard thì LED nháy xanh. Viewer trên PC vẫn nhận ảnh và trạng thái qua COM
 liên tục; đóng viewer không làm bo ngừng nhận diện hoặc gửi MQTT.
+
+## 12. Phạm vi bảo mật và bài kiểm thử đang có
+
+Trong cấu hình này, gateway nhận MQTTS 8885 và NTP UDP 123 từ các interface
+PC được firewall cho phép. Web 8080/MQTT18884 publish localhost, PostgreSQL
+chỉ dùng mạng nội bộ Docker. IP LAN không đồng nghĩa địa chỉ public Internet;
+khả năng truy cập từ ngoài còn phụ thuộc router, firewall, VPN hoặc tunnel.
+ESP32 là client; laptop/Windows, Wi-Fi, tài khoản ThingsBoard, khóa phần mềm
+và cổng nạp vật lý cũng thuộc các thành phần cần bảo vệ.
+
+Kiểm thử tự động tạo gói từ **client Python mô phỏng bên gửi** để kiểm tra
+bộ nhận/xác minh của gateway, đối chiếu thêm kết quả lưu trên ThingsBoard.
+Không gọi đó là tấn công đã chiếm quyền ESP32 hoặc tấn công dashboard.
+Bo thật đã được kiểm tra vận hành kết nối/ký/gửi/ACK song song; đó là bằng
+chứng tích hợp, khác với thử khai thác firmware ESP32.
+
+- `Test-LiveSecurity.ps1`: gửi vào gateway thật 8885, làm bộ đếm dashboard
+  thật tăng. Danh tính tạm demo_only cách ly mẫu chuẩn khỏi hàng đợi gửi.
+- `Test-Security.ps1 -Demo`: bộ hồi quy riêng 8886/device thử; không cộng
+  counter vào dashboard thật. Kiểm tra thêm dữ liệu được lưu bằng REST.
+- Unit test dùng clock mô phỏng cho reset/restart/expiry/schema. Không
+  tương đương thử mất điện vật lý, kiểm thử Wi-Fi/OS, DoS hoặc pentest web.
+
+VERIFIED là đạt kiểm tra thông điệp, không chứng minh người thật, đúng danh
+tính hoặc chính xác thị giác. Khóa bị lộ/firmware bị chiếm quyền hoặc token
+đích bị lấy vẫn nằm ngoài bảo vệ hiện tại. Xem [kịch bản demo](DEMO_BAO_MAT_VA_KIEM_THU.md).
+
+Ba bài thử riêng vẫn có ý nghĩa: máy không có quyền MQTT bị từ chối đăng
+nhập; client đã đăng nhập nhưng sai HMAC bị chặn nội dung; gói có HMAC đúng
+vẫn bị bỏ qua/từ chối nếu trùng sequence hoặc sai phiên. Lớp cuối bảo vệ
+khỏi phát lại và ghi lặp: gói đó không tạo thêm mẫu telemetry, audit vẫn
+ghi nhận lý do. Đây không phải chỉ ẩn số liệu trong dashboard.
+
+Mật khẩu và khóa HMAC hiện cùng nằm trong sdkconfig và config gateway.
+Chúng khác chức năng nhưng chưa được cách ly nơi lưu. Nếu mất cả hai,
+người giả mạo có thể xin phiên mới và ký dữ liệu giả với sequence mới;
+chống phát lại không chứng minh phép đo đến từ camera thật. Giả định chỉ
+lộ mật khẩu là một tình huống thử lộ một phần, không phải bảo đảm khi đã
+đọc được toàn bộ cấu hình/firmware. CA công khai không phải một trong hai
+bí mật đó; nhiều client có thể cùng dùng nó để xác minh gateway.

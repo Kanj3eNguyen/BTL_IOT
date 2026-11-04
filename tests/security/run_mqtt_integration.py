@@ -37,7 +37,11 @@ def wait_for(test, timeout=12):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--thingsboard", action="store_true")
+    parser.add_argument("--demo", action="store_true", help="Explain each check and pause for ThingsBoard inspection in an interactive terminal")
+    parser.add_argument("--no-pause", action="store_true", help="Do not wait for Enter in demo mode")
     args = parser.parse_args()
+    if args.demo and not args.thingsboard:
+        parser.error("Use --demo with --thingsboard so the demonstration verifies actual persistence")
     folder = ROOT / ".private" / ("mqtt_test_" + time.strftime("%Y%m%d_%H%M%S"))
     folder.mkdir()
     config = json.loads((ROOT / ".private/mqtt_guard/config.json").read_text())
@@ -46,12 +50,16 @@ def main():
     password = secrets.token_urlsafe(24)
     config.update(bind="127.0.0.1:8886", ntp_port=0, database=str(folder / "state.db"),
                   devices={device: {"key_id": "test-key", "hmac_key_hex": key.hex(), "mqtt_password": password}})
+    # Keep the test's upstream MQTT identity separate from the real gateway.
+    config["thingsboard"]["client_id"] = "guard-self-test-" + secrets.token_hex(8)
     tb = None
     tb_device = None
+    test_name = None
     if args.thingsboard:
         tb = ThingsBoard()
         tb.login("tenant@thingsboard.org", load_account())
-        tb_device = tb.call("POST", "/api/device", {"name": "MQTT security test " + secrets.token_hex(4), "type": "Test"})["id"]["id"]
+        test_name = "MQTT security test " + secrets.token_hex(4)
+        tb_device = tb.call("POST", "/api/device", {"name": test_name, "type": "Test"})["id"]["id"]
         config["thingsboard"]["token"] = tb.call("GET", f"/api/device/{tb_device}/credentials")["credentialsId"]
     config_path = folder / "config.json"
     config_path.write_text(json.dumps(config))
@@ -73,6 +81,11 @@ def main():
     boot = secrets.token_hex(16)
     checks = []
 
+    def record(name, explanation):
+        checks.append(name)
+        if args.demo:
+            print(f"[PASS {len(checks):02d}] {name}: {explanation}", flush=True)
+
     def base(kind, **fields):
         return {"v": 1, "type": kind, "device_id": device, "key_id": "test-key", "boot_id": boot,
                 "sent_at_ms": int(time.time() * 1000), **fields}
@@ -84,10 +97,10 @@ def main():
         except sqlite3.OperationalError:
             return {}
 
-    def expect(reason, before, message, topic="telemetry"):
+    def expect(reason, before, message, topic="telemetry", explanation=""):
         client.publish(prefix + topic, message, qos=1).wait_for_publish(timeout=5)
         wait_for(lambda: counts().get(reason, 0) > before)
-        checks.append(reason)
+        record(reason, explanation or "Gateway trả đúng quyết định mong đợi.")
 
     def can_connect():
         try:
@@ -100,6 +113,13 @@ def main():
 
     try:
         wait_for(can_connect, 20)
+        if args.demo:
+            print("\nDEMO BẢO MẬT MQTT — gateway thử riêng 127.0.0.1:8886", flush=True)
+            print("Device thử trên ThingsBoard: " + test_name, flush=True)
+            print("Mở http://localhost:8080 → Devices → tìm tên trên → Latest telemetry.", flush=True)
+            print("Chỉ dùng khóa/mật khẩu sinh riêng cho bài thử; không tấn công device thật.", flush=True)
+            if sys.stdin.isatty() and not args.no_pause:
+                input("Nhấn Enter để chạy các tình huống (chương trình giữ device thử để xem kết quả cuối)... ")
         client.connect("localhost", 8886)
         client.loop_start()
         assert connected.get(timeout=5) == 0
@@ -108,7 +128,7 @@ def main():
         client.publish(prefix + "hello", sign(hello, key), 1)
         grant, _ = authenticate(messages.get(timeout=5), config["devices"])
         assert grant["type"] == "session"
-        checks.append("TLS_AND_AUTHENTICATED_SESSION")
+        record("TLS_AND_AUTHENTICATED_SESSION", "Kết nối TLS, xác thực MQTT và nhận phiên có HMAC hợp lệ.")
         sid = grant["session_id"]
         data = {"boot_id": 17, "sequence": 1, "uptime_ms": 20000, "driver_present": True,
                 "eyes_valid": True, "eyes_closed": False, "eye_closed_probability": .1,
@@ -117,7 +137,7 @@ def main():
                 "blink_count": 2, "yawn_count": 0, "blink_window_count": 2, "yawn_window_count": 0}
         sample = base("sample", session_id=sid, sequence=1, sample_age_ms=20, data=data)
         wire = sign(sample, key)
-        expect("ACCEPTED", 0, wire)
+        expect("ACCEPTED", 0, wire, explanation="Bản tin chuẩn: sequence=1, blink=2, yawn=0, PERCLOS=0.1 (10%).")
         if tb:
             wait_for(lambda: counts().get("FORWARDED", 0) == 1, 20)
             def persisted():
@@ -128,29 +148,29 @@ def main():
             values = wait_for(persisted, 15)
             assert values["integrity_status"][0]["value"] == "VERIFIED", repr(values)
             assert values["auth_sequence"][0]["value"] == "1"
-            checks.append("REAL_THINGSBOARD_PERSISTED")
-        expect("DUPLICATE", 0, wire)
+            record("REAL_THINGSBOARD_PERSISTED", "REST xác nhận ThingsBoard đã lưu sequence=1 và VERIFIED.")
+        expect("DUPLICATE", 0, wire, explanation="Phát lại đúng byte gói vừa gửi; không tạo mẫu chuyển tiếp mới.")
         envelope = json.loads(wire)
         changed = json.loads(base64.b64decode(envelope["payload"]))
         changed["data"]["perclos"] = .99
         envelope["payload"] = base64.b64encode(json.dumps(changed).encode()).decode()
-        expect("BAD_MAC", 0, json.dumps(envelope).encode())
-        expect("BAD_MAC", 1, sign(sample, b"x" * 32))
+        expect("BAD_MAC", 0, json.dumps(envelope).encode(), explanation="Đổi PERCLOS từ 0.1 thành 0.99 nhưng giữ MAC cũ: bị loại.")
+        expect("BAD_MAC", 1, sign(sample, b"x" * 32), explanation="Dùng khóa HMAC sai để ký: bị loại.")
         sample["data"]["blink_count"] = 999
-        expect("REPLAY_OR_SEQUENCE_CONFLICT", 0, sign(sample, key))
+        expect("REPLAY_OR_SEQUENCE_CONFLICT", 0, sign(sample, key), explanation="Ký hợp lệ nhưng tái dùng sequence=1 với blink=999: bị loại.")
         stale = {**sample, "sent_at_ms": int(time.time() * 1000) - 60000}
-        expect("STALE_OR_FUTURE", 0, sign(stale, key))
+        expect("STALE_OR_FUTURE", 0, sign(stale, key), explanation="Gói ký đúng nhưng timestamp cũ 60 giây: bị loại.")
         # Renew session, then replay the earlier correctly signed sample.
         client.publish(prefix + "hello", sign(base("hello", request_id=secrets.token_hex(16)), key), 1)
         wait_for(lambda: counts().get("SESSION", 0) >= 2)
-        expect("SESSION_INVALID", 0, wire)
+        expect("SESSION_INVALID", 0, wire, explanation="Xin phiên mới rồi gửi lại gói của phiên cũ: bị loại.")
         # Device cannot publish the server's downlink or bypass to TB's topic.
         before = counts().get("ACCEPTED", 0)
         client.publish(prefix + "down", wire, 1).wait_for_publish(5)
         client.publish("v1/devices/me/telemetry", b'{"integrity_status":"VERIFIED"}', 1).wait_for_publish(5)
         time.sleep(.3)
         assert counts().get("ACCEPTED", 0) == before
-        checks.append("PUBLISH_ACL")
+        record("PUBLISH_ACL", "Gửi xuống topic downlink hoặc topic ThingsBoard trực tiếp không được chấp nhận.")
         rejected = queue.Queue()
         bad_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="guard-" + device)
         bad_client.username_pw_set(device, "incorrect-password")
@@ -162,7 +182,7 @@ def main():
             assert rejected.get(timeout=12)[1]
         finally:
             bad_client.disconnect(); bad_client.loop_stop()
-        checks.append("WRONG_MQTT_PASSWORD_REJECTED")
+        record("WRONG_MQTT_PASSWORD_REJECTED", "Kết nối với mật khẩu MQTT sai bị từ chối.")
         with sqlite3.connect(config["database"]) as db:
             assert db.execute("SELECT count(*) FROM outbox").fetchone()[0] == 1
         if tb:
@@ -170,10 +190,29 @@ def main():
             values = tb.call("GET", f"/api/plugins/telemetry/DEVICE/{tb_device}/values/timeseries?keys=auth_sequence,perclos")
             assert values["auth_sequence"][0]["value"] == "1"
             assert float(values["perclos"][0]["value"]) == .1
-            checks.append("ATTACKS_NOT_PERSISTED_TO_THINGSBOARD")
-        report = {"passed": True, "checks": checks, "counters": counts()}
+            # Check stored history too, rather than only the latest values.
+            start_ms = sample["sent_at_ms"] - 60000
+            end_ms = int(time.time() * 1000) + 1000
+            history = tb.call("GET", f"/api/plugins/telemetry/DEVICE/{tb_device}/values/timeseries?"
+                              f"keys=auth_sequence,perclos&startTs={start_ms}&endTs={end_ms}&agg=NONE&limit=100")
+            assert len(history.get("auth_sequence", [])) == 1, repr(history)
+            assert len(history.get("perclos", [])) == 1, repr(history)
+            assert history["auth_sequence"][0]["value"] == "1"
+            assert float(history["perclos"][0]["value"]) == .1
+            record("ATTACKS_NOT_PERSISTED_TO_THINGSBOARD", "Outbox chỉ 1 hàng; ThingsBoard vẫn sequence=1, PERCLOS=0.1; FORWARDED=1.")
+        report = {"passed": True, "checks": checks, "counters": counts(),
+                  "test_device_name": test_name, "test_device_id": tb_device,
+                  "gateway_port": 8886, "report_folder": str(folder)}
         (folder / "result.json").write_text(json.dumps(report, indent=2))
+        (ROOT / ".private/security_latest.json").write_text(json.dumps(report, indent=2))
         print(json.dumps(report))
+        if args.demo:
+            print("\nKẾT QUẢ: 12 kiểm tra PASS; ACCEPTED=1, FORWARDED=1. Gói sửa/phát lại không tạo thêm hàng outbox.", flush=True)
+            print("Xem device thử: sequence=1, blink_count=2, yawn_count=0, perclos=0.1, integrity_status=VERIFIED.", flush=True)
+            print("Báo cáo riêng: " + str(folder / "result.json"), flush=True)
+            print("Counter tấn công nằm trong báo cáo/log gateway thử; dashboard thiết bị thật không tăng vì bài thử được tách riêng.", flush=True)
+            if sys.stdin.isatty() and not args.no_pause:
+                input("Giữ màn hình này để xem/chụp kết quả trên ThingsBoard. Nhấn Enter để dọn device thử và kết thúc... ")
     finally:
         client.disconnect(); client.loop_stop()
         process.terminate(); process.wait(timeout=10); log.close()

@@ -1,8 +1,5 @@
 $ErrorActionPreference = 'Stop'
-function Invoke-LocalWsl {
-    $ErrorActionPreference = 'Continue'
-    & wsl @args
-}
+. (Join-Path $PSScriptRoot 'Local-Docker.ps1')
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $pidFile = Join-Path $projectRoot '.private\runtime\gateway.pid'
 if (Test-Path $pidFile) {
@@ -13,9 +10,6 @@ if (Test-Path $pidFile) {
         Stop-Process -Id $gatewayId
     }
 }
-$linuxRoot = (Invoke-LocalWsl -d DriverMonitorLocal -u root -- wslpath -a $projectRoot.Replace('\','/')).Trim()
-Invoke-LocalWsl -d DriverMonitorLocal -u root -- docker compose --env-file "$linuxRoot/.private/thingsboard/compose.env" `
-    -f "$linuxRoot/server/thingsboard_local/compose.yml" stop
+Invoke-LocalCompose stop
 if ($LASTEXITCODE -ne 0) { throw 'Could not stop containers cleanly; check Docker before shutdown.' }
-Invoke-LocalWsl -d DriverMonitorLocal -u root -- pkill -TERM -x dockerd
-Write-Output 'Local services stopped. Database volumes and private keys are preserved.'
+Write-Output 'Project containers and gateway stopped. Docker Desktop, other projects, database volumes and private keys are preserved.'
