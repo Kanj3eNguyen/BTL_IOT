@@ -107,7 +107,6 @@ class SerialReader(threading.Thread):
                                         if field in state and state.get(field) != previous.get(field):
                                             self.store.event(f"{name}: {state[field]}")
                                     previous = state
-                                    self.store.update(state=state, state_received=time.monotonic())
                                 elif kind == JPEG_KIND:
                                     if metadata:
                                         (self.args.out / "frames" / f"{frame_id:06d}.jpg").write_bytes(payload)
@@ -116,15 +115,20 @@ class SerialReader(threading.Thread):
                                         metadata.flush()
                                     frame_id += 1
                                     fps_frames += 1
-                                    newest = payload
+                                    # A read batch may end with the status for
+                                    # the NEXT image. Keep the status that was
+                                    # immediately before this JPEG, as a pair.
+                                    newest = (payload, state.copy())
                             if newest is not None:
-                                frame = cv2.imdecode(np.frombuffer(newest, np.uint8), cv2.IMREAD_COLOR)
+                                payload, frame_state = newest
+                                frame = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
                                 if frame is not None:
                                     now = time.monotonic()
                                     if now - fps_start >= 2:
                                         fps = fps_frames / (now - fps_start)
                                         fps_start, fps_frames = now, 0
-                                    self.store.update(frame=frame, frame_id=frame_id, frame_received=now, fps=fps)
+                                    self.store.update(frame=frame, frame_id=frame_id, frame_received=now, fps=fps,
+                                                      state=frame_state, state_received=now)
                             self.store.update(bad_packets=stats["bad_packets"], frames=frame_id)
                 except (serial.SerialException, OSError) as exc:
                     message = f"{self.args.port}: không mở/đọc được cổng ({type(exc).__name__}); đang thử lại"
@@ -418,11 +422,9 @@ class Monitor:
             return
         now = time.monotonic()
         snapshot = self.store.snapshot()
-        if now - self.last_fields >= .25:
-            self.fields(snapshot, now)
-            self.last_fields = now
         fresh_frame = now - snapshot.get("frame_received", -1e9) < 2
-        if fresh_frame and snapshot.get("frame_id") != self.last_frame_id:
+        new_frame = fresh_frame and snapshot.get("frame_id") != self.last_frame_id
+        if new_frame:
             frame = snapshot["frame"]
             size = max(160, min(500, self.camera.winfo_width()-8, self.camera.winfo_height()-8))
             image = cv2.resize(frame, (size, size), interpolation=cv2.INTER_LINEAR)
@@ -434,6 +436,11 @@ class Monitor:
         elif not fresh_frame:
             self.camera.configure(image="", text="Đang chờ ảnh từ ESP32…\nTự nối lại khi COM khả dụng")
             self.last_frame_id = -1
+        # Refresh the matching observations in the same UI tick as the image.
+        # A 250 ms label timer alone can show NHẮM over an already open eye.
+        if new_frame or now - self.last_fields >= .25:
+            self.fields(snapshot, now)
+            self.last_fields = now
         if self.args.seconds and now - self.started >= self.args.seconds:
             self.close()
         else:

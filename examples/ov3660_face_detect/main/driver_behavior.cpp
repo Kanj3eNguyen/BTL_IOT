@@ -300,24 +300,24 @@ DriverBehavior DriverBehaviorAnalyzer::update(const who::detect::WhoDetect::resu
                         eye_closed_probability(img, re_x, re_y, face_w, face_h);
                     if (left_probability >= 0 && right_probability >= 0) {
                         out.eyes_valid = true;
+                        out.left_eye_closed_probability = left_probability;
+                        out.right_eye_closed_probability = right_probability;
                         out.eye_closed_probability = (left_probability + right_probability) * 0.5f;
-                        // Near frontal, preserve short blinks. At a mild
-                        // angle, require two strong frames so a partially
-                        // occluded eye cannot create a false closure.
-                        if (eye_pose_deviation <= 0.10f) {
-                            m_closed_candidate_frames = out.eye_closed_probability >= 0.80f
-                                                            ? 2
-                                                            : out.eye_closed_probability >= 0.50f
-                                                                  ? std::min<int>(m_closed_candidate_frames + 1, 2)
-                                                                  : 0;
-                        } else {
-                            m_closed_candidate_frames = out.eye_closed_probability >= 0.65f
-                                                            ? std::min<int>(m_closed_candidate_frames + 1, 2)
-                                                            : 0;
-                        }
-                        m_open_candidate_frames = out.eye_closed_probability < 0.50f
-                                                      ? std::min<int>(m_open_candidate_frames + 1, 2)
-                                                      : 0;
+                        // One shadowed/misaligned eye must not pull an open
+                        // pair over the old 0.50 average threshold. Require
+                        // evidence from both eyes and two confident frames.
+                        const float weaker_closed = std::min(left_probability, right_probability);
+                        const bool confident_closed = out.eye_closed_probability >= 0.65f && weaker_closed >= 0.50f;
+                        const bool strong_open = out.eye_closed_probability < 0.50f || weaker_closed < 0.35f;
+                        const bool fast_blink = eye_pose_deviation <= 0.10f &&
+                                                out.eye_closed_probability >= 0.85f && weaker_closed >= 0.75f;
+                        m_closed_candidate_frames = fast_blink ? 2 : confident_closed
+                                                                         ? std::min<int>(m_closed_candidate_frames + 1, 2)
+                                                                         : 0;
+                        // Release on the first clear open frame. Holding the
+                        // previous closure for another frame made open eyes
+                        // still look closed and extended PERCLOS in bright rooms.
+                        m_open_candidate_frames = strong_open ? 2 : 0;
                         out.eyes_closed = m_last_eyes_closed;
                         if (m_closed_candidate_frames >= 2) {
                             out.eyes_closed = true;

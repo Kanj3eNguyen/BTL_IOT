@@ -30,6 +30,8 @@ struct DriverBehavior {
     float mouth_aperture = 0;
     float mouth_contrast = 0;
     float eye_closed_probability = 0;
+    float left_eye_closed_probability = 0;
+    float right_eye_closed_probability = 0;
     float mouth_open_probability = 0;
     float eye_closed_duration_s = 0;
     float perclos = 0;

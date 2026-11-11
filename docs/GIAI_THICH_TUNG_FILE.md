@@ -318,10 +318,12 @@ thực hiện lần lượt cho từng mắt:
 Điểm này gần 1 khi model nghiêng về nhắm, gần 0 khi nghiêng về mở. Nó là
 ước lượng của model; không được xem `0.90` là bảo đảm đúng 90% ngoài thực tế.
 
-**Bước E — đổi điểm mắt thành trạng thái ổn định.** Mặt gần chính diện
-(`pose≤0.10`) có điểm ≥0.80 thì được nhận nhắm ngay ở một khung; mức ≥0.50
-cần hai khung liên tiếp. Với `0.10<pose≤0.18`, cần hai khung ≥0.65. Để mở
-lại cần hai khung dưới 0.50. Nếu chưa đủ điều kiện đổi, giữ trạng thái hợp
+**Bước E — đổi điểm mắt thành trạng thái ổn định.** Bình thường cần hai
+khung liên tiếp có trung bình >=0.65 và cả hai mắt đều >=0.50 để nhận nhắm.
+Mặt gần chính diện (`pose<=0.10`) có trung bình >=0.85 và cả hai mắt >=0.75
+được bắt nhắm ngay ở một khung để giữ blink ngắn rõ ràng. Một khung có
+trung bình <0.50 hoặc một mắt <0.35 mở lại ngay, tránh kéo dài trạng thái
+nhắm sang ảnh đã mở. Nếu chưa đủ điều kiện đổi, giữ trạng thái hợp
 lệ trước đó. Hai khung có thể dài ngắn khác nhau tùy FPS; đây là lọc theo
 số khung, chưa phải bộ lọc với thời gian cố định.
 
@@ -563,7 +565,7 @@ controller chỉ đổi trong -4..3, mỗi lần một mức và cách nhau ít 
 giây. Không có phép tăng sáng ảnh trên PC rồi đưa ngược về bo.
 
 `driver_lighting_update()` đọc `face_luma` khi có mặt vừa phát hiện, làm mượt
-bằng `EMA += 0.15*(mẫu mới-EMA)`, rồi so với dải mục tiêu 105–145/255.
+bằng `EMA += 0.15*(mẫu mới-EMA)`, rồi so với dải mục tiêu 82–112/255.
 Thấp hơn thì tăng mục tiêu phơi sáng một mức; cao hơn thì giảm một mức.
 Dải giữa được giữ nguyên để tránh liên tục tăng/giảm. Khi mất mặt ngắn,
 giữ mức cũ; sau ba giây không có mặt mới dùng độ sáng toàn cảnh với dải
@@ -571,6 +573,13 @@ giữ mức cũ; sau ba giây không có mặt mới dùng độ sáng toàn c�
 quá tối làm khó tìm lại mặt. Chỉ dùng box mặt đủ 68 × 75 pixel, cùng mức
 kích thước tối thiểu cho phân tích. Khi chuyển từ toàn cảnh sang mặt, khởi tạo lại EMA theo mặt để
 không lẫn hai vùng đo khác nhau.
+
+Để tránh liên tục đẩy sáng lên tối đa khi mặt ở trước nền sáng, controller
+giới hạn AE ở +1 nếu độ sáng toàn cảnh >=160 và cao hơn mặt ít nhất 55/255.
+Giới hạn này chỉ nhả khi toàn cảnh <=140 hoặc chênh lệch <=35, giúp tránh
+đổi qua lại do dao động nhỏ. Trong cảnh tối không áp giới hạn nền sáng và
+vẫn có thể tăng tới +3. Mục tiêu thấp hơn ưu tiên giữ chi tiết mắt thay vì
+làm da sáng trên preview; không thay trọng số hay ngưỡng phân loại mắt.
 
 `lighting_state` gồm `UNAVAILABLE`, `ADJUST`, `OK`, `DARK`, `BRIGHT` (serial
 dùng mã 0..4, MQTT dùng chữ). `ae_level` là mức mục tiêu đang dùng. `OK` chỉ
@@ -652,6 +661,12 @@ ServerReader đọc health/audit và ApiReader gọi REST trong các thread riê
 UI thread chỉ dựng ảnh/nhãn. Store giữ bản mới nhất và log hữu hạn. COM mất
 thì reader tự thử lại, trạng thái ESP32 quá 2 giây hoặc health quá 6 giây được coi cũ.
 API offline và mẫu ThingsBoard cũ được hiển thị riêng, không giả là mất gateway.
+
+Mỗi JPEG được giữ cùng bản sao JSON ngay trước nó; không lấy JSON của ảnh
+kế tiếp nếu một lượt đọc UART chứa nhiều gói. Reader cập nhật cặp ảnh/trạng
+thái nguyên tử trong Store, UI vẽ ảnh và nhãn cùng tick. Điều này tránh
+hiện mắt đã mở trong ảnh nhưng nhãn vẫn giữ NHẮM từ khung trước. Nó không
+thay kết luận do bo tính; nếu chính model sai thì vẫn cần kiểm tra ảnh/điểm.
 
 `driver_system_monitor.py` không nhận MQTT thay bo và không tính lại mắt/
 miệng trên PC. SerialReader cung cấp ảnh mới nhất cùng JSON, ServerReader
@@ -934,7 +949,7 @@ không điều khiển chính sách này. Các gói lỗi vẫn tăng counter ga
 | [test_mqtt_guard.py](../tests/security/test_mqtt_guard.py) | Unit test HMAC/parser/freshness/session/replay/outbox/cách ly demo; dùng clock/DB thử, không chỉnh giờ PC. |
 | [run_mqtt_integration.py](../tests/security/run_mqtt_integration.py) | Client Python và gateway thử thật 8886, TLS/auth/ACL/gói sai, REST/latest/history của device thử; cuối lượt dọn process/device thử. |
 | [demo_live_gateway.py](../tests/security/demo_live_gateway.py) | Client Python gửi gói vào gateway đang dùng8885; đọc SQLite chỉ để đối chiếu và REST để xác nhận counter, mẫu thật và không chuyển số đo demo. |
-| [test_system_monitor.py](../tests/monitor/test_system_monitor.py) | 5 unit test: độ mới health, counter không cộng lặp, loại counter sai kiểu, lọc metadata log và giới hạn bộ đệm sự kiện. Không cần mở COM hay cửa sổ Tk. |
+| [test_system_monitor.py](../tests/monitor/test_system_monitor.py) | 6 unit test: độ mới health, nhóm/kiểu counter, lọc log, giới hạn bộ đệm và ghép đúng ảnh/JSON khi status của ảnh kế tiếp có trong cùng lượt đọc. Không mở COM hay cửa sổ Tk. |
 
 Hai script test mô phỏng bên gửi của giao thức ESP32 bằng Python; không
 chứng minh đã tấn công/chiếm quyền bo. Live demo không ghi counter trực

@@ -11,6 +11,7 @@ VideoCapture *camera = nullptr;
 bool supported = false;
 bool have_luma = false;
 bool last_was_face = false;
+bool bright_background = false;
 float smoothed_luma = 0;
 int level = -2;
 int64_t last_adjust_us = 0;
@@ -18,6 +19,9 @@ int64_t last_face_us = 0;
 int64_t settling_until_us = 0;
 constexpr int kMinLevel = -4;
 constexpr int kMaxLevel = 3;
+constexpr int kBacklitMaxLevel = 1;
+constexpr float kFaceLow = 82.0f;
+constexpr float kFaceHigh = 112.0f;
 constexpr int64_t kAdjustPeriodUs = 1500000;
 
 bool set_level(int next)
@@ -34,6 +38,10 @@ bool set_level(int next)
 void driver_lighting_init(VideoCapture *capture)
 {
     camera = capture;
+    have_luma = false;
+    last_was_face = false;
+    bright_background = false;
+    last_face_us = 0;
     supported = set_level(-2);
     last_adjust_us = esp_timer_get_time();
     settling_until_us = last_adjust_us + kAdjustPeriodUs;
@@ -47,6 +55,18 @@ void driver_lighting_update(DriverBehavior &behavior)
                       behavior.face_box[3] - behavior.face_box[1] >= 75;
     if (face) {
         last_face_us = now;
+        // With a bright wall/lamp behind the driver, whole-sensor AE cannot
+        // independently brighten the face. Chasing a high face target instead
+        // pushes gain/exposure to the limit and shifts the trained eye patches.
+        // Hysteresis keeps this ceiling from switching on every small movement.
+        const int background_delta = static_cast<int>(behavior.scene_luma) - behavior.face_luma;
+        if (behavior.scene_luma >= 160 && background_delta >= 55) {
+            bright_background = true;
+        } else if (behavior.scene_luma <= 140 || background_delta <= 35) {
+            bright_background = false;
+        }
+    } else if (!last_face_us || now - last_face_us > 3000000) {
+        bright_background = false;
     }
     // Short detector misses must not make the controller chase the background.
     const bool sample = face || !last_face_us || now - last_face_us > 3000000;
@@ -59,10 +79,18 @@ void driver_lighting_update(DriverBehavior &behavior)
             smoothed_luma += 0.15f * (luma - smoothed_luma);
         }
         last_was_face = face;
-        const float low = face ? 105.0f : 80.0f;
-        const float high = face ? 145.0f : 155.0f;
+        // Preserve eye contrast instead of trying to make skin look bright in
+        // the preview. Dim scenes can still use the original +3 upper limit.
+        const float low = face ? kFaceLow : 80.0f;
+        const float high = face ? kFaceHigh : 155.0f;
+        const int ceiling = face && bright_background ? kBacklitMaxLevel : kMaxLevel;
         if (camera && now - last_adjust_us >= kAdjustPeriodUs) {
             int direction = smoothed_luma < low ? 1 : smoothed_luma > high ? -1 : 0;
+            if (level > ceiling) {
+                direction = -1;
+            } else if (level == ceiling && direction > 0) {
+                direction = 0;
+            }
             if (!face) {
                 // Do not chase a ceiling lamp so far down that a returning
                 // face is too dark for the detector to find again.

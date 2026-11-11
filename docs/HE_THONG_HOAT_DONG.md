@@ -119,8 +119,9 @@ liên tiếp trước khi đổi từ mở sang nhắm hoặc từ đóng sang m
 
 | Quan sát | Cách quyết định hiện tại |
 | --- | --- |
-| Mắt gần nhìn thẳng | Điểm nhắm từ 0,80 có thể bắt một khung rất ngắn; mức 0,50 cần hai khung liên tiếp. Mở lại cần hai khung dưới 0,50. |
-| Đầu nghiêng nhẹ | Cần hai khung liên tiếp có điểm nhắm ít nhất 0,65. |
+| Mắt gần nhìn thẳng | Hai khung có trung bình >=0,65 và mỗi mắt >=0,50; riêng trung bình >=0,85 và mỗi mắt >=0,75 được bắt trong một khung. |
+| Đầu nghiêng nhẹ | Cần hai khung liên tiếp có trung bình >=0,65 và mỗi mắt >=0,50. |
+| Mở lại | Một khung có trung bình <0,50 hoặc một mắt <0,35 chuyển về mở ngay, tránh giữ NHẮM trên ảnh đã mở. |
 | Đầu nghiêng quá mức | Nếu mũi lệch so với trung điểm hai mắt quá 18% khoảng cách hai mắt, `eyes_valid=false`; bo tạm ngừng đếm blink/PERCLOS từ các khung đó. |
 | Miệng | Hai khung liên tiếp có điểm mở từ 0,50 để chuyển sang “mở”; hai khung dưới 0,50 để chuyển lại “đóng”. |
 
@@ -240,6 +241,10 @@ serial nhận được không chứng minh Wi-Fi/MQTT nối; gateway sống khô
 minh bo gửi; API trả mẫu cũ không chứng minh đang có telemetry mới. Giao
 diện phân biệt và đánh dấu dữ liệu cũ. Tab sự kiện ESP32 được suy ra từ JSON,
 không phải thu toàn bộ console ESP-IDF thô trên UART nhị phân.
+
+Ảnh và JSON đi kèm được giữ thành cặp, cùng cập nhật trên UI. Nhãn mắt
+không dùng timer chậm hơn ảnh để tránh trông như báo nhắm sau khi mắt mở.
+Đồng bộ viewer không sửa được dự đoán sai thực sự của model trên bo.
 
 ### MQTT: số liệu qua gateway tới ThingsBoard local
 

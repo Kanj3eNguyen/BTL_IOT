@@ -115,6 +115,7 @@ void stream_task(void *)
             "\"auto_light\":%s,\"ae_level\":%d,\"lighting_state\":%u,\"uptime_ms\":%lu,\"driver_present\":%s,\"face_holdover\":%s,"
             "\"scene_luma\":%u,\"face_luma_valid\":%s,\"face_luma\":%u,"
             "\"eyes_valid\":%s,\"eyes_closed\":%s,\"eye_closed_probability\":%.3f,"
+            "\"left_eye_closed_probability\":%.3f,\"right_eye_closed_probability\":%.3f,"
             "\"left_eye_aperture\":%.3f,\"right_eye_aperture\":%.3f,"
             "\"left_eye_dark_fraction\":%.3f,\"right_eye_dark_fraction\":%.3f,"
             "\"left_eye_contrast\":%.3f,\"right_eye_contrast\":%.3f,\"eye_closed_duration\":%.2f,"
@@ -143,6 +144,7 @@ void stream_task(void *)
             behavior.eyes_valid ? "true" : "false",
             behavior.eyes_closed ? "true" : "false",
             behavior.eye_closed_probability,
+            behavior.left_eye_closed_probability, behavior.right_eye_closed_probability,
             behavior.left_eye_aperture, behavior.right_eye_aperture,
             behavior.left_eye_dark_fraction, behavior.right_eye_dark_fraction,
             behavior.left_eye_contrast, behavior.right_eye_contrast,
